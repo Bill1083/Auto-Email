@@ -1,0 +1,248 @@
+// AutoMail — Prisma schema (SQLite)
+// Lightweight, zero-config persistence suitable for single-VPS deployment.
+
+generator client {
+  provider      = "prisma-client-js"
+  // "native" covers local development. The Linux targets cover both common
+  // VPS architectures so the Docker image works on x64 and ARM64 hosts alike.
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// One connected mailbox. Tokens are encrypted with TOKEN_ENCRYPTION_KEY
+/// before they touch the database.
+model Account {
+  id                   String    @id @default(cuid())
+  provider             String    @default("gmail") // gmail | mock
+  email                String    @unique
+  displayName          String?
+  refreshTokenEnc      String?
+  accessTokenEnc       String?
+  accessTokenExpiresAt DateTime?
+  scopes               String    @default("")
+  status               String    @default("ACTIVE") // ACTIVE | NEEDS_REAUTH | PAUSED
+  lastError            String?
+
+  // New-mail lane cursor: everything received after this instant is "new".
+  lastSyncAt    DateTime?
+  lastNewLaneAt DateTime?
+  // Scheduler bookkeeping.
+  lastScheduledRunAt DateTime?
+
+  // Backlog lane: a snapshot of ids is taken once (see BacklogItem) and
+  // worked through in the configured order.
+  backlogBuiltAt  DateTime?
+  backlogDone     Boolean @default(false)
+  backlogEstimate Int?
+
+  // Per-account overrides.
+  dailyLimit   Int?
+  labelPrefix  String @default("AutoMail")
+  /// JSON object: category key or system label -> provider label id.
+  labelMapJson String @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+  runs     Run[]
+  rules    Rule[]
+  backlog  BacklogItem[]
+
+  @@map("accounts")
+}
+
+/// One id in the backlog snapshot. `position` is the provider's newest-first
+/// order, so either processing order is a simple sort.
+model BacklogItem {
+  id        String   @id @default(cuid())
+  accountId String
+  gmailId   String
+  position  Int
+  status    String   @default("PENDING") // PENDING | DONE | GONE
+  createdAt DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, gmailId])
+  @@index([accountId, status, position])
+  @@map("backlog_items")
+}
+
+/// One processed email: what it looked like, what was decided, what was done,
+/// and what the user said about it afterwards. Bodies are never stored.
+model Message {
+  id              String   @id @default(cuid())
+  accountId       String
+  gmailId         String
+  threadId        String   @default("")
+  internalDate    DateTime
+  fromName        String?
+  fromAddress     String
+  fromDomain      String
+  toAddress       String?
+  subject         String   @default("")
+  snippet         String   @default("")
+  hasAttachments  Boolean  @default(false)
+  listUnsubscribe Boolean  @default(false)
+  /// JSON array of provider label ids at processing time (INBOX, UNREAD, CATEGORY_PROMOTIONS ...).
+  gmailLabelsJson String   @default("[]")
+
+  // Decision.
+  category   String
+  action     String // KEEP | ARCHIVE | TRASH | ATTENTION
+  confidence Int     @default(0)
+  reason     String  @default("")
+  needsReply Boolean @default(false)
+  decidedBy  String  @default("ai") // rule | ai | user
+  ruleId     String?
+  /// Set when a deterministic guard overrode what the model suggested.
+  guardNote  String?
+
+  // Application state.
+  status             String    @default("APPLIED") // DRY_RUN | PENDING_REVIEW | APPLIED | TRASHED | REVERTED
+  appliedAt          DateTime?
+  /// JSON: { addedLabelIds, removedLabelIds, trashed, starred } — replayed in reverse by undo.
+  appliedChangesJson String    @default("{}")
+  attentionDoneAt    DateTime?
+
+  // User feedback.
+  userAction   String?
+  userCategory String?
+  feedbackNote String?
+  feedbackAt   DateTime?
+
+  runId       String?
+  lane        String   @default("new") // new | backlog
+  processedAt DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  run     Run?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@unique([accountId, gmailId])
+  @@index([accountId, status])
+  @@index([accountId, action])
+  @@index([accountId, processedAt])
+  @@index([processedAt])
+  @@index([fromAddress])
+  @@map("messages")
+}
+
+/// One execution of the pipeline for one account.
+model Run {
+  id            String    @id @default(cuid())
+  accountId     String
+  trigger       String    @default("manual") // schedule | manual | cron
+  lane          String    @default("both") // new | backlog | both
+  status        String    @default("RUNNING") // RUNNING | OK | PARTIAL | FAILED
+  error         String?
+  dryRun        Boolean   @default(false)
+  budget        Int       @default(0)
+  fetched       Int       @default(0)
+  ruleDecided   Int       @default(0)
+  aiDecided     Int       @default(0)
+  kept          Int       @default(0)
+  archived      Int       @default(0)
+  trashProposed Int       @default(0)
+  autoTrashed   Int       @default(0)
+  attention     Int       @default(0)
+  costUsd       Float     @default(0)
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+
+  account  Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  messages Message[]
+  calls    AiCall[]
+
+  @@index([accountId, startedAt])
+  @@index([startedAt])
+  @@map("runs")
+}
+
+/// One Gemini request, with the real token usage it reported.
+model AiCall {
+  id            String   @id @default(cuid())
+  runId         String?
+  accountId     String?
+  purpose       String   @default("classify") // classify | learn
+  model         String
+  emailCount    Int      @default(0)
+  promptTokens  Int      @default(0)
+  outputTokens  Int      @default(0)
+  thoughtTokens Int      @default(0)
+  cachedTokens  Int      @default(0)
+  costUsd       Float    @default(0)
+  latencyMs     Int      @default(0)
+  ok            Boolean  @default(true)
+  errorCode     String?
+  createdAt     DateTime @default(now())
+
+  run Run? @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@map("ai_calls")
+}
+
+/// A deterministic rule (sender / domain / subject) or a free-text instruction
+/// that is sent to the model with every batch.
+model Rule {
+  id        String   @id @default(cuid())
+  /// Null applies to every account.
+  accountId String?
+  kind      String // SENDER | DOMAIN | SUBJECT_CONTAINS | FREEFORM
+  pattern   String   @default("")
+  action    String? // KEEP | ARCHIVE | TRASH | ATTENTION (null on FREEFORM = instruction only)
+  category  String?
+  note      String   @default("")
+  /// TRASH rules only: trash immediately instead of queuing for review.
+  autoApply Boolean  @default(false)
+  source    String   @default("user") // user | learned
+  hits      Int      @default(0)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([kind, enabled])
+  @@map("rules")
+}
+
+/// The closed taxonomy the model chooses from. Seeded from lib/categories.ts.
+model Category {
+  key           String  @id
+  name          String
+  description   String  @default("")
+  /// Null means no provider label is applied (e.g. Junk).
+  labelName     String?
+  defaultAction String  @default("KEEP")
+  allowTrash    Boolean @default(false)
+  /// Auto-trash without review once confidence >= the configured floor.
+  autoTrash     Boolean @default(false)
+  enabled       Boolean @default(true)
+  builtIn       Boolean @default(false)
+  sortOrder     Int     @default(100)
+
+  @@map("categories")
+}
+
+/// Key/value store for everything editable from the Settings and Rules pages.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+/// Learned-rule suggestions the user dismissed, so they stay dismissed.
+model SuggestionDismissal {
+  key       String   @id
+  createdAt DateTime @default(now())
+
+  @@map("suggestion_dismissals")
+}

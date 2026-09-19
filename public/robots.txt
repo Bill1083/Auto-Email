@@ -1,0 +1,3 @@
+# AutoMail is a private email dashboard; keep it out of search indexes.
+User-agent: *
+Disallow: /
