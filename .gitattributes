@@ -1,0 +1,7 @@
+# Keep line endings consistent so the shell entrypoint and Dockerfile work
+# when the repo is checked out on Windows and built from there.
+* text=auto eol=lf
+*.sh text eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
