@@ -88,7 +88,7 @@ export default async function OverviewPage() {
         <SetupChecklist
           status={status}
           accountCount={accounts.length}
-          dryRun={settings.dryRun}
+          dryRunAccounts={stats.dryRunAccounts}
           needsReauth={stats.accountsNeedingReauth}
         />
 

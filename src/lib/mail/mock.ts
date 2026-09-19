@@ -10,6 +10,7 @@
  */
 
 import { prisma, withDatabase } from '@/lib/prisma';
+import { GLOBAL_SCOPE } from '@/lib/settings';
 import type { ListPage, MailProfile, MailProvider } from '@/lib/mail/provider';
 import { cleanBody, parseAddress } from '@/lib/mail/gmail/parse';
 import type { RawEmail } from '@/lib/types';
@@ -288,7 +289,9 @@ function stateKey(email: string): string {
 }
 
 async function loadState(email: string): Promise<MockState> {
-  const row = await withDatabase(() => prisma.setting.findUnique({ where: { key: stateKey(email) } }));
+  const row = await withDatabase(() =>
+    prisma.setting.findUnique({ where: { scope_key: { scope: GLOBAL_SCOPE, key: stateKey(email) } } }),
+  );
   if (row.ok && row.data) {
     try {
       const parsed = JSON.parse(row.data.value) as MockState;
@@ -307,8 +310,8 @@ async function saveState(email: string, state: MockState): Promise<void> {
   const value = JSON.stringify(state);
   await withDatabase(() =>
     prisma.setting.upsert({
-      where: { key: stateKey(email) },
-      create: { key: stateKey(email), value },
+      where: { scope_key: { scope: GLOBAL_SCOPE, key: stateKey(email) } },
+      create: { scope: GLOBAL_SCOPE, key: stateKey(email), value },
       update: { value },
     }),
   );

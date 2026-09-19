@@ -2,7 +2,7 @@ import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { listCategories } from '@/lib/categories';
 import { ReviewWorkbench } from '@/components/review/review-workbench';
 import { PageHeader } from '@/components/stat-card';
-import { getSettings } from '@/lib/settings';
+import { dryRunByAccount } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,7 +15,15 @@ export default async function ReviewPage({
 }) {
   const accounts = await listAccounts();
   const { selected, selectedId } = await resolveSelection(accounts);
-  const [categories, settings] = await Promise.all([listCategories(), getSettings()]);
+
+  // Dry run is per mailbox, so the banner reflects whichever mailboxes are
+  // in view: one of them, or any of them on the all-accounts view.
+  const inScope = selected ? [selected] : accounts;
+  const [categories, dryRunFlags] = await Promise.all([
+    listCategories(),
+    dryRunByAccount(inScope.map((account) => account.id)),
+  ]);
+  const dryRun = inScope.some((account) => dryRunFlags.get(account.id));
 
   return (
     <>
@@ -28,7 +36,7 @@ export default async function ReviewPage({
       <ReviewWorkbench
         selectedId={selectedId}
         categories={categories.map((c) => ({ key: c.key, name: c.name }))}
-        dryRun={settings.dryRun}
+        dryRun={dryRun}
         initialTab={searchParams.tab === 'attention' ? 'attention' : 'review'}
       />
     </>

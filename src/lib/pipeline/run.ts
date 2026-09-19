@@ -114,7 +114,9 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     };
   }
 
-  const settings = await getSettings();
+  // Scoped to this mailbox: its own profile, learned notes, dry-run state and
+  // backlog query, with the shared settings for everything else.
+  const settings = await getSettings(account.id);
   const lane = options.lane ?? 'both';
   const dailyLimit = effectiveDailyLimit(account, settings);
   const already = await processedToday(account.id);
@@ -470,7 +472,7 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     // --- Learning housekeeping (cheap, best effort) ------------------------
     try {
       await autoPromoteSuggestions(account.id, settings);
-      await maybeRefreshLearnedNotes(settings);
+      await maybeRefreshLearnedNotes(account.id, settings);
     } catch (error) {
       console.warn('[automail] learning housekeeping failed:', error instanceof Error ? error.message : error);
     }
@@ -643,17 +645,21 @@ async function buildBacklogSnapshot(
   );
 }
 
-async function maybeRefreshLearnedNotes(settings: AppSettings): Promise<void> {
+/** Weekly, per mailbox: distil that mailbox's corrections into preferences. */
+async function maybeRefreshLearnedNotes(accountId: string, settings: AppSettings): Promise<void> {
   if (!settings.learnedNotesAuto) return;
   const last = settings.learnedNotesUpdatedAt ? Date.parse(settings.learnedNotesUpdatedAt) : 0;
   if (Date.now() - last < 7 * 86_400_000) return;
-  const feedback = await withDatabase(() => prisma.message.count({ where: { userAction: { not: null } } }));
+  const feedback = await withDatabase(() =>
+    prisma.message.count({ where: { accountId, userAction: { not: null } } }),
+  );
   if (!feedback.ok || feedback.data < 5) return;
   // Stamp first so a failing model call does not retry on every run.
+  const stamp = new Date().toISOString();
   await prisma.setting.upsert({
-    where: { key: 'learnedNotesUpdatedAt' },
-    create: { key: 'learnedNotesUpdatedAt', value: new Date().toISOString() },
-    update: { value: new Date().toISOString() },
+    where: { scope_key: { scope: accountId, key: 'learnedNotesUpdatedAt' } },
+    create: { scope: accountId, key: 'learnedNotesUpdatedAt', value: stamp },
+    update: { value: stamp },
   });
-  await regenerateLearnedNotes(null);
+  await regenerateLearnedNotes(accountId);
 }

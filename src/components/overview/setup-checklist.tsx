@@ -16,12 +16,13 @@ interface Item {
 export function SetupChecklist({
   status,
   accountCount,
-  dryRun,
+  dryRunAccounts,
   needsReauth,
 }: {
   status: IntegrationStatus;
   accountCount: number;
-  dryRun: boolean;
+  /** Mailboxes still in dry run; each one decides for itself. */
+  dryRunAccounts: number;
   needsReauth: number;
 }) {
   const items: Item[] = [
@@ -51,9 +52,12 @@ export function SetupChecklist({
       hint: `${needsReauth} account${needsReauth === 1 ? '' : 's'} need reconnecting from Settings.`,
     },
     {
-      done: !dryRun,
+      done: dryRunAccounts === 0,
       label: 'Dry run switched off',
-      hint: 'Decisions are logged but nothing is applied to Gmail. Turn it off in Settings once you trust the results.',
+      hint:
+        accountCount > 1
+          ? `${dryRunAccounts} of ${accountCount} mailboxes still log decisions without applying them. Each mailbox is switched over separately in Settings.`
+          : 'Decisions are logged but nothing is applied to Gmail. Turn it off for this mailbox in Settings once you trust the results.',
       info: true,
     },
   ];

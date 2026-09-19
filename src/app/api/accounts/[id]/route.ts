@@ -7,6 +7,7 @@ import { revokeToken } from '@/lib/mail/gmail/oauth';
 import { isRunning } from '@/lib/pipeline/run';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { serializeAccount } from '@/lib/serialize';
+import { deleteAccountSettings } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,6 +80,9 @@ export async function DELETE(_request: Request, { params }: RouteContext) {
     }
     const deleted = await withDatabase(() => prisma.account.delete({ where: { id: account.id } }));
     if (!deleted.ok) return fail('The account could not be deleted.', 500);
+    // The Setting rows are keyed by scope, not a foreign key, so the
+    // mailbox's profile and learned notes have to be cleared explicitly.
+    await deleteAccountSettings(account.id);
     return ok({ deleted: account.id });
   }, 'DELETE /api/accounts/:id');
 }

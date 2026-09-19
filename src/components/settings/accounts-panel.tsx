@@ -19,7 +19,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
 import { api, errorMessage } from '@/lib/client';
 import type { AccountDto } from '@/lib/serialize';
 import { formatRelative } from '@/lib/time';
@@ -33,7 +32,6 @@ export function AccountsPanel({
   redirectUri,
   loginRedirectUri,
   loginEmail,
-  defaultDailyLimit,
 }: {
   accounts: AccountDto[];
   googleConfigured: boolean;
@@ -42,13 +40,11 @@ export function AccountsPanel({
   redirectUri: string;
   loginRedirectUri: string;
   loginEmail: string | null;
-  defaultDailyLimit: number;
 }) {
   const router = useRouter();
   const params = useSearchParams();
   const [busy, setBusy] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<AccountDto | null>(null);
-  const [limits, setLimits] = useState<Record<string, string>>({});
 
   // The OAuth callback lands here with ?connected= or ?error=.
   useEffect(() => {
@@ -161,7 +157,6 @@ export function AccountsPanel({
         ) : (
           <ul className="space-y-3">
             {accounts.map((account) => {
-              const limit = limits[account.id] ?? (account.dailyLimit === null ? '' : String(account.dailyLimit));
               return (
                 <li key={account.id} className="rounded-md border p-3">
                   <div className="flex flex-wrap items-center gap-2">
@@ -169,8 +164,10 @@ export function AccountsPanel({
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{account.email}</p>
                       <p className="text-xs text-muted-foreground">
-                        {account.provider === 'mock' ? 'Demo mailbox' : 'Gmail'} · connected {formatRelative(account.createdAt)} · new mail
-                        checked {formatRelative(account.lastNewLaneAt)} ·{' '}
+                        {account.provider === 'mock' ? 'Demo mailbox' : 'Gmail'} · connected{' '}
+                        {formatRelative(account.createdAt)} · cap{' '}
+                        {account.dailyLimit === null ? 'shared default' : `${account.dailyLimit}/day`} · new
+                        mail checked {formatRelative(account.lastNewLaneAt)} ·{' '}
                         {account.backlogBuiltAt
                           ? account.backlogDone
                             ? 'backlog done'
@@ -190,27 +187,6 @@ export function AccountsPanel({
                     <p className="mt-2 rounded bg-danger/10 px-2 py-1 text-xs text-danger">{account.lastError}</p>
                   ) : null}
                   <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                      Daily cap
-                      <Input
-                        type="number"
-                        min={0}
-                        max={5000}
-                        className="h-8 w-24"
-                        placeholder={String(defaultDailyLimit)}
-                        value={limit}
-                        onChange={(e) => setLimits({ ...limits, [account.id]: e.target.value })}
-                        onBlur={() => {
-                          const value = limit.trim() === '' ? null : Number(limit);
-                          if (value === account.dailyLimit) return;
-                          void mutate(
-                            account.id,
-                            () => api(`/api/accounts/${account.id}`, { method: 'PATCH', json: { dailyLimit: value } }),
-                            value === null ? 'Using the global cap.' : `Cap set to ${value} a day.`,
-                          );
-                        }}
-                      />
-                    </label>
                     <span className="ml-auto flex flex-wrap gap-1.5">
                       {account.status === 'ACTIVE' ? (
                         <RunNowButton accountId={account.id} size="sm" variant="outline" label="Run now" />

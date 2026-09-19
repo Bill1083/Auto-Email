@@ -63,7 +63,7 @@ async function context(message: Message) {
   if (Object.keys(labelMap).length === 0) {
     labelMap = await ensureAccountLabels(account, provider);
   }
-  const settings = await getSettings();
+  const settings = await getSettings(account.id);
   return { account, provider, labelMap, settings };
 }
 

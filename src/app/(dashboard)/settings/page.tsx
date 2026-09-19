@@ -1,9 +1,10 @@
 import { Suspense } from 'react';
 import { Bot, Clock3, Coins, Database, KeyRound, Link2 } from 'lucide-react';
 
-import { listAccounts } from '@/lib/accounts';
+import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { AccountsPanel } from '@/components/settings/accounts-panel';
 import { DangerZone } from '@/components/settings/danger-zone';
+import { MailboxSettings } from '@/components/settings/mailbox-settings';
 import { ProcessingForm } from '@/components/settings/processing-form';
 import { PageHeader, StatCard } from '@/components/stat-card';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,7 +12,7 @@ import { env, integrationStatus } from '@/lib/env';
 import { isDatabaseReachable } from '@/lib/prisma';
 import { serializeAccount } from '@/lib/serialize';
 import { sessionEmail } from '@/lib/session';
-import { getSettings } from '@/lib/settings';
+import { getSettings, getSettingsForAccounts } from '@/lib/settings';
 import { costSummary } from '@/lib/stats';
 import { cn, formatInt, formatUsd } from '@/lib/utils';
 
@@ -54,14 +55,29 @@ function IntegrationRow({
 }
 
 export default async function SettingsPage() {
-  const [accounts, settings, cost, databaseReachable, loginEmail] = await Promise.all([
-    listAccounts(),
+  const accounts = await listAccounts();
+  const [settings, perAccount, cost, databaseReachable, loginEmail, selection] = await Promise.all([
+    // No account scope: the shared settings.
     getSettings(),
+    getSettingsForAccounts(accounts.map((account) => account.id)),
     costSummary(null),
     isDatabaseReachable(),
     sessionEmail(),
+    resolveSelection(accounts),
   ]);
   const status = integrationStatus();
+
+  const mailboxes = accounts.map((account) => {
+    const scoped = perAccount.get(account.id);
+    return {
+      id: account.id,
+      email: account.email,
+      dailyLimit: account.dailyLimit,
+      dryRun: scoped?.dryRun ?? settings.dryRun,
+      backlogOrder: scoped?.backlogOrder ?? settings.backlogOrder,
+      backlogQuery: scoped?.backlogQuery ?? settings.backlogQuery,
+    };
+  });
 
   return (
     <>
@@ -76,9 +92,14 @@ export default async function SettingsPage() {
             redirectUri={env.googleRedirectUri}
             loginRedirectUri={`${env.appUrl}/api/auth/google/callback`}
             loginEmail={loginEmail}
-            defaultDailyLimit={settings.dailyLimit}
           />
         </Suspense>
+
+        <MailboxSettings
+          mailboxes={mailboxes}
+          defaultId={selection.selected?.id ?? null}
+          defaultDailyLimit={settings.dailyLimit}
+        />
 
         <Card>
           <CardHeader className="pb-3">

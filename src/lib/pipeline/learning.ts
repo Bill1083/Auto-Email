@@ -328,14 +328,17 @@ export interface LearnedNotesResult {
 }
 
 /**
- * Distil the correction history into general preferences. Runs weekly when
- * `learnedNotesAuto` is on, or on demand from the Rules page.
+ * Distil one mailbox's correction history into general preferences. Runs
+ * weekly when `learnedNotesAuto` is on, or on demand from the Rules page.
+ *
+ * Scoped to a single mailbox on purpose: the notes are sent with that
+ * mailbox's batches, so a work address never learns from a personal one.
  */
-export async function regenerateLearnedNotes(accountId: string | null = null): Promise<LearnedNotesResult> {
-  const settings = await getSettings();
+export async function regenerateLearnedNotes(accountId: string): Promise<LearnedNotesResult> {
+  const settings = await getSettings(accountId);
   const rows = await withDatabase(() =>
     prisma.message.findMany({
-      where: { ...(accountId ? { accountId } : {}), userAction: { not: null } },
+      where: { accountId, userAction: { not: null } },
       orderBy: { feedbackAt: 'desc' },
       take: 200,
       select: EXAMPLE_SELECT,
@@ -399,6 +402,9 @@ export async function regenerateLearnedNotes(accountId: string | null = null): P
   }
 
   const notes = outcome.data.notes.map((n) => `- ${n.trim().replace(/^[-*]\s*/, '')}`).join('\n');
-  await updateSettings({ learnedNotes: notes, learnedNotesUpdatedAt: new Date().toISOString() });
+  await updateSettings(
+    { learnedNotes: notes, learnedNotesUpdatedAt: new Date().toISOString() },
+    accountId,
+  );
   return { ok: true, notes, reason: null, costUsd };
 }

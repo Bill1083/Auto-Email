@@ -13,7 +13,42 @@ import { Switch } from '@/components/ui/switch';
 import { api, errorMessage } from '@/lib/client';
 import type { AppSettings } from '@/lib/settings';
 
-type Editable = Omit<AppSettings, 'profileText' | 'learnedNotes' | 'learnedNotesUpdatedAt'>;
+/**
+ * The settings shared by the whole install. Anything that belongs to one
+ * mailbox — the profile, learned preferences, dry run, the backlog scope and
+ * the per-mailbox cap — is edited in the per-mailbox card instead.
+ */
+type Editable = Omit<
+  AppSettings,
+  'profileText' | 'learnedNotes' | 'learnedNotesUpdatedAt' | 'dryRun' | 'backlogOrder' | 'backlogQuery'
+>;
+
+const GLOBAL_FIELDS: (keyof Editable)[] = [
+  'dailyLimit',
+  'maxPerRun',
+  'aiBatchSize',
+  'maxBodyChars',
+  'runTimes',
+  'newMailPollMinutes',
+  'labelPrefix',
+  'geminiModel',
+  'priceInputPerM',
+  'priceOutputPerM',
+  'autoTrashMinConfidence',
+  'moveReviewOutOfInbox',
+  'starAttention',
+  'autoPromoteRules',
+  'suggestionThreshold',
+  'learnedNotesAuto',
+];
+
+function pickGlobal(settings: AppSettings): Editable {
+  const out = {} as Editable;
+  for (const key of GLOBAL_FIELDS) {
+    (out as Record<string, unknown>)[key] = settings[key];
+  }
+  return out;
+}
 
 function Field({
   label,
@@ -57,8 +92,10 @@ function Toggle({
 
 export function ProcessingForm({ settings, timezone }: { settings: AppSettings; timezone: string }) {
   const router = useRouter();
-  const [form, setForm] = useState<Editable>(settings);
+  const [form, setForm] = useState<Editable>(() => pickGlobal(settings));
   const [saving, setSaving] = useState(false);
+
+  const saved = pickGlobal(settings);
 
   const num = (key: keyof Editable) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [key]: e.target.value === '' ? 0 : Number(e.target.value) });
@@ -70,15 +107,16 @@ export function ProcessingForm({ settings, timezone }: { settings: AppSettings; 
     setSaving(true);
     try {
       const patch: Partial<Editable> = {};
-      for (const key of Object.keys(form) as (keyof Editable)[]) {
-        if (form[key] !== settings[key]) (patch as Record<string, unknown>)[key] = form[key];
+      for (const key of GLOBAL_FIELDS) {
+        if (form[key] !== saved[key]) (patch as Record<string, unknown>)[key] = form[key];
       }
       if (Object.keys(patch).length === 0) {
         toast.info('Nothing changed.');
         return;
       }
-      await api('/api/settings', { method: 'PATCH', json: patch });
-      toast.success('Settings saved.');
+      // No accountId: these are the shared settings.
+      await api('/api/settings?accountId=all', { method: 'PATCH', json: patch });
+      toast.success('Shared settings saved.');
       router.refresh();
     } catch (error) {
       toast.error(errorMessage(error));
@@ -92,10 +130,16 @@ export function ProcessingForm({ settings, timezone }: { settings: AppSettings; 
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Processing</CardTitle>
-          <CardDescription className="mt-1">How much, how often, and in which order.</CardDescription>
+          <CardDescription className="mt-1">
+            Shared by every mailbox. Dry run, the backlog scope and a mailbox&apos;s own cap are set
+            per mailbox below.
+          </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <Field label="Daily cap (emails per mailbox)" hint="Rule-decided emails count too. Raise it to clear the backlog faster.">
+          <Field
+            label="Default daily cap"
+            hint="Emails per mailbox per day, unless that mailbox sets its own. Rule-decided emails count too."
+          >
             <Input type="number" min={0} max={5000} value={form.dailyLimit} onChange={num('dailyLimit')} />
           </Field>
           <Field label="Max per run" hint="0 = whatever is left of the daily cap.">
@@ -113,27 +157,6 @@ export function ProcessingForm({ settings, timezone }: { settings: AppSettings; 
           <Field label="Body characters sent to the model" hint="Longer excerpts cost more tokens and rarely change the decision.">
             <Input type="number" min={200} max={20000} step={100} value={form.maxBodyChars} onChange={num('maxBodyChars')} />
           </Field>
-          <Field label="Backlog order">
-            <select
-              className="h-10 w-full rounded-md border bg-background px-3 text-sm"
-              value={form.backlogOrder}
-              onChange={(e) => setForm({ ...form, backlogOrder: e.target.value as Editable['backlogOrder'] })}
-            >
-              <option value="newest">Newest first</option>
-              <option value="oldest">Oldest first</option>
-            </select>
-          </Field>
-          <Field label="Backlog search" hint="Gmail search syntax. Defines which existing mail is in scope. Reset the backlog after changing it.">
-            <Input value={form.backlogQuery} onChange={text('backlogQuery')} className="font-mono text-xs sm:col-span-2" />
-          </Field>
-          <div className="sm:col-span-2 lg:col-span-3">
-            <Toggle
-              label="Dry run"
-              hint="Decide and log everything, but change nothing in Gmail. Turn off once you trust the results."
-              checked={form.dryRun}
-              onChange={(v) => setForm({ ...form, dryRun: v })}
-            />
-          </div>
         </CardContent>
       </Card>
 
@@ -167,7 +190,10 @@ export function ProcessingForm({ settings, timezone }: { settings: AppSettings; 
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Learning</CardTitle>
-          <CardDescription className="mt-1">How your reviews turn into rules and preferences.</CardDescription>
+          <CardDescription className="mt-1">
+            How your reviews turn into rules and preferences. Each mailbox learns from its own
+            corrections only.
+          </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
           <Field label="Suggest a rule after N consistent reviews of a sender">
@@ -182,7 +208,7 @@ export function ProcessingForm({ settings, timezone }: { settings: AppSettings; 
             />
             <Toggle
               label="Refresh learned preferences weekly"
-              hint="One Gemini call a week distils your recent reviews into the preference list."
+              hint="One Gemini call a week per mailbox, distilling its recent reviews into its own preference list."
               checked={form.learnedNotesAuto}
               onChange={(v) => setForm({ ...form, learnedNotesAuto: v })}
             />
@@ -213,7 +239,7 @@ export function ProcessingForm({ settings, timezone }: { settings: AppSettings; 
       <div className="flex justify-end">
         <Button type="submit" disabled={saving}>
           {saving ? <Loader2 className="animate-spin" /> : <Save />}
-          Save settings
+          Save shared settings
         </Button>
       </div>
     </form>

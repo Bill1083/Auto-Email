@@ -9,7 +9,7 @@ import { isGeminiConfigured } from '@/lib/gemini';
 import { categoryNudges, suggestRules } from '@/lib/pipeline/learning';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { serializeAccount, serializeCategory, serializeRule } from '@/lib/serialize';
-import { getSettings } from '@/lib/settings';
+import { getSettings, getSettingsForAccounts } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,7 +20,8 @@ export default async function RulesPage() {
   const { selected, selectedId } = await resolveSelection(accounts);
   const settings = await getSettings();
 
-  const [categories, rules, suggestions, nudges] = await Promise.all([
+  const [perAccount, categories, rules, suggestions, nudges] = await Promise.all([
+    getSettingsForAccounts(accounts.map((account) => account.id)),
     listCategories(true),
     withDatabase(() => prisma.rule.findMany({ orderBy: [{ kind: 'asc' }, { createdAt: 'desc' }] })),
     suggestRules(selected?.id ?? null, settings.suggestionThreshold),
@@ -28,17 +29,29 @@ export default async function RulesPage() {
   ]);
   const names = Object.fromEntries(categories.map((c) => [c.key, c.name]));
 
+  // Profiles and learned notes are stored per mailbox, so each one is read
+  // against its own account rather than from a shared row.
+  const mailboxes = accounts.map((account) => {
+    const scoped = perAccount.get(account.id);
+    return {
+      id: account.id,
+      email: account.email,
+      profileText: scoped?.profileText ?? '',
+      learnedNotes: scoped?.learnedNotes ?? '',
+      learnedNotesUpdatedAt: scoped?.learnedNotesUpdatedAt ?? '',
+    };
+  });
+
   return (
     <>
       <PageHeader
         title="Rules & preferences"
-        description="What you tell the AI up front, what it has learned from your reviews, and the categories it files into."
+        description="What you tell the AI up front, what it has learned from your reviews, and the categories it files into. The profile and learned preferences belong to one mailbox each; rules and categories are shared unless you scope them."
       />
       <div className="space-y-5">
         <ProfileEditor
-          profileText={settings.profileText}
-          learnedNotes={settings.learnedNotes}
-          learnedNotesUpdatedAt={settings.learnedNotesUpdatedAt}
+          mailboxes={mailboxes}
+          defaultId={selected?.id ?? null}
           geminiConfigured={isGeminiConfigured()}
         />
         <SuggestionsList

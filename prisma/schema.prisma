@@ -231,11 +231,19 @@ model Category {
 }
 
 /// Key/value store for everything editable from the Settings and Rules pages.
+///
+/// `scope` is either "global" or an account id. Settings that describe one
+/// mailbox — the About-you profile, what has been learned from corrections on
+/// it, whether it is still in dry run, and what counts as its backlog — are
+/// stored per account and never shared between mailboxes. Everything else
+/// (model, prices, batch size, run times) is global.
 model Setting {
-  key       String   @id
+  scope     String   @default("global")
+  key       String
   value     String
   updatedAt DateTime @updatedAt
 
+  @@id([scope, key])
   @@map("settings")
 }
 

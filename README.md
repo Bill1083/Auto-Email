@@ -99,8 +99,10 @@ a mechanical reversal.
 
 ### Learning
 
-- **About you** and **learned preferences** on the Rules page are sent with
-  every batch.
+- **About you** and **learned preferences** on the Rules page belong to one
+  mailbox each and are sent with that mailbox's batches. A work address and a
+  personal one never share a profile, and neither learns from the other's
+  corrections.
 - Every correction you make (rescue, re-categorise, "not important", thumbs
   up) is stored and shown to the model as a worked example when the same
   sender or domain comes up again.
@@ -130,13 +132,14 @@ that is at the current cap, and what it will cost.
   the category) and **needs attention** (done, archive, never flag this sender).
 - **Activity** — everything the pipeline did, filterable, with undo, thumbs-up
   and "change" on every row, plus a **Deleted** view for the 30-day undo window.
-- **Rules** — your profile, learned preferences, rules and instructions,
-  suggested rules, and the category editor (default action, allow trash,
-  auto-trash, add your own).
-- **Settings** — mailboxes (connect, reconnect, pause, per-mailbox cap, reset
-  backlog, disconnect), processing (cap, batch size, run times, polling,
-  dry run, backlog order and search), mailbox behaviour, learning, model and
-  prices, and what is configured on the server.
+- **Rules** — your profile and learned preferences (one set per mailbox, picked
+  with the mailbox tabs), rules and instructions, suggested rules, and the
+  category editor (default action, allow trash, auto-trash, add your own).
+- **Settings** — mailboxes (connect, reconnect, pause, reset backlog,
+  disconnect), per-mailbox settings (that mailbox's daily cap, dry run and
+  backlog scope), shared processing (default cap, batch size, run times,
+  polling, body length), mailbox behaviour, learning, model and prices, and
+  what is configured on the server.
 
 The header switches between mailboxes, or shows all of them together. Switching
 is a cookie and a server render; you never sign out to change mailbox.
@@ -186,6 +189,14 @@ Nothing is required to boot: the dashboard shows a setup checklist. See
 Processing defaults (`DAILY_EMAIL_LIMIT`, `RUN_TIMES`, `DRY_RUN`, and so on) only
 seed the Settings page on first boot; the dashboard owns them afterwards.
 
+Settings come in two scopes. Most are shared by the whole install: the model,
+the prices, the batch size, the run times. The ones that describe a particular
+mailbox are stored against it and never inherited from a shared row — the
+"About you" profile, the preferences learned from corrections on it, whether it
+is still in dry run, its daily cap, and what counts as its backlog. Connecting a
+new mailbox starts it at the `.env` defaults (dry run on), not at another
+mailbox's settings.
+
 ---
 
 ## API
@@ -211,9 +222,9 @@ Every route except the ones marked public needs the session cookie.
 | POST        | `/api/messages/bulk`                 | The same, for many ids                              |
 | GET/POST    | `/api/rules`, PATCH/DELETE `/api/rules/:id` | Rules and instructions                        |
 | GET/POST    | `/api/rules/suggestions`             | Learned suggestions; accept or dismiss              |
-| POST        | `/api/rules/learn`                   | Regenerate the learned preferences                  |
+| POST        | `/api/rules/learn`                   | Regenerate one mailbox's learned preferences        |
 | GET/POST    | `/api/categories`, PATCH/DELETE `/api/categories/:key` | The taxonomy                       |
-| GET/PATCH   | `/api/settings`                      | Runtime settings                                    |
+| GET/PATCH   | `/api/settings?accountId=`           | Settings for that mailbox; `all` for the shared ones |
 | POST        | `/api/settings/reset`                | Clear history                                       |
 | GET         | `/api/stats`                         | Overview numbers                                    |
 

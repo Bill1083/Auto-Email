@@ -7,7 +7,7 @@ import type { Account, Run } from '@prisma/client';
 import { daysToClear, effectiveDailyLimit } from '@/lib/pipeline/budget';
 import { projectedCost } from '@/lib/pipeline/cost';
 import { prisma, withDatabase } from '@/lib/prisma';
-import type { AppSettings } from '@/lib/settings';
+import { dryRunByAccount, type AppSettings } from '@/lib/settings';
 import {
   dayKey,
   nextScheduledInstant,
@@ -54,6 +54,8 @@ export interface OverviewStats {
   lastRun: Run | null;
   nextRunAt: Date | null;
   accountsNeedingReauth: number;
+  /** Mailboxes in scope that are still in dry run; each decides for itself. */
+  dryRunAccounts: number;
   dryRun: boolean;
 }
 
@@ -159,7 +161,10 @@ export async function overviewStats(
     return { processedToday, awaitingReview, needsAttention, totalProcessed, totalTrashed, recent, lastRun, backlogPending };
   });
 
-  const cost = await costSummary(accountId, now);
+  const [cost, dryRunFlags] = await Promise.all([
+    costSummary(accountId, now),
+    dryRunByAccount(scoped.map((account) => account.id)),
+  ]);
 
   const series: DaySeries[] = days.map((day) => ({ day, kept: 0, archived: 0, trashed: 0, attention: 0 }));
   const byDay = new Map(series.map((s) => [s.day, s]));
@@ -181,6 +186,7 @@ export async function overviewStats(
   const perDay = dailyLimit;
 
   const times = parseRunTimes(settings.runTimes);
+  const dryRunAccounts = scoped.filter((account) => dryRunFlags.get(account.id)).length;
 
   return {
     processedToday: data.ok ? data.data.processedToday : 0,
@@ -198,6 +204,7 @@ export async function overviewStats(
     lastRun: data.ok ? data.data.lastRun : null,
     nextRunAt: nextScheduledInstant(now, times),
     accountsNeedingReauth: scoped.filter((a) => a.status === 'NEEDS_REAUTH').length,
-    dryRun: settings.dryRun,
+    dryRunAccounts,
+    dryRun: dryRunAccounts > 0,
   };
 }
