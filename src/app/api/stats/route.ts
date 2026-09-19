@@ -1,6 +1,6 @@
 import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { guard, ok } from '@/lib/api';
-import { getSettings } from '@/lib/settings';
+import { getSettingsForAccounts } from '@/lib/settings';
 import { overviewStats } from '@/lib/stats';
 
 export const dynamic = 'force-dynamic';
@@ -16,8 +16,8 @@ export async function GET(request: Request) {
     } else {
       accountId = (await resolveSelection(accounts)).selected?.id ?? null;
     }
-    const settings = await getSettings();
-    const stats = await overviewStats(accountId, accounts, settings);
+    const perAccount = await getSettingsForAccounts(accounts.map((account) => account.id));
+    const stats = await overviewStats(accountId, accounts, perAccount);
     return ok({
       ...stats,
       lastRun: stats.lastRun

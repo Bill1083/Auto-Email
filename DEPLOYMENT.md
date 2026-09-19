@@ -338,11 +338,20 @@ cd /home/deploy/automail && git pull && docker compose up -d --build
 
 The volume is untouched by rebuilds, so history survives.
 
-**A caveat worth knowing:** the entrypoint creates the schema on a *fresh*
-volume and then leaves it alone. It does not migrate an existing database, so if
-an update changes `prisma/schema.prisma` you must apply that change yourself.
-Back up first, then run the Prisma CLI against the volume from a throwaway
-container:
+**Database upgrades run on boot.** The entrypoint creates the schema on a fresh
+volume, and on an existing one it runs the migrations built into
+`scripts/apply-schema.mjs`. Each checks the database's actual state first, so it
+runs once and is a no-op on every later boot. The startup log says what it did:
+
+```bash
+docker logs automail 2>&1 | grep "\[automail\]"
+```
+
+Lines starting `[automail] migrated:` are migrations that just ran. Back up the
+database before pulling an update anyway (see below); it costs nothing.
+
+If a future schema change ever arrives without a built-in migration, apply it
+with the Prisma CLI against the volume from a throwaway container:
 
 ```bash
 docker run --rm -v automail_automail-data:/data -v "$PWD":/src -w /src -e DATABASE_URL=file:/data/automail.db node:22-bookworm-slim sh -c "npm ci && npx prisma db push"

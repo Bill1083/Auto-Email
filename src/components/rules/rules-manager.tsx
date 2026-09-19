@@ -136,11 +136,15 @@ export function RulesManager({
                 onChange={(e) => setForm({ ...form, accountId: e.target.value })}
               >
                 <option value="">All mailboxes</option>
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.email}
-                  </option>
-                ))}
+                {/* With a mailbox chosen in the top right, a rule is for that
+                    mailbox or for all of them, never quietly for another. */}
+                {accounts
+                  .filter((a) => selectedId === 'all' || a.id === selectedId)
+                  .map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {selectedId === 'all' ? a.email : `This mailbox (${a.email})`}
+                    </option>
+                  ))}
               </select>
             </div>
 

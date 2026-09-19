@@ -15,17 +15,18 @@ interface RouteContext {
   params: { id: string };
 }
 
+// The daily cap is a per-mailbox setting now (PATCH /api/settings), so it is
+// no longer accepted here: one source of truth.
 const patchSchema = z
   .object({
     status: z.enum(['ACTIVE', 'PAUSED']),
-    dailyLimit: z.number().int().min(0).max(5_000).nullable(),
     displayName: z.string().trim().max(80).nullable(),
     resetBacklog: z.literal(true),
   })
   .partial()
   .strict();
 
-/** PATCH /api/accounts/:id — pause/resume, per-account cap, backlog reset. */
+/** PATCH /api/accounts/:id — pause/resume, display name, backlog reset. */
 export async function PATCH(request: Request, { params }: RouteContext) {
   return guard(async () => {
     const parsed = await readJson(request, patchSchema, 16 * 1024);

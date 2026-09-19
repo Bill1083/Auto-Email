@@ -25,7 +25,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { env, integrationStatus } from '@/lib/env';
 import { isRunning } from '@/lib/pipeline/run';
 import { prisma, withDatabase } from '@/lib/prisma';
-import { getSettings } from '@/lib/settings';
+import { getSettingsForAccounts } from '@/lib/settings';
 import { overviewStats } from '@/lib/stats';
 import { formatDateTime, formatRelative } from '@/lib/time';
 import { cn, formatInt, formatUsd, plural } from '@/lib/utils';
@@ -37,9 +37,15 @@ export default async function OverviewPage() {
   const { selected, selectedId } = await resolveSelection(accounts);
   const scope = selected ? { accountId: selected.id } : {};
 
-  const [settings, categories] = await Promise.all([getSettings(), listCategories(true)]);
+  const [perAccount, categories] = await Promise.all([
+    getSettingsForAccounts(accounts.map((account) => account.id)),
+    listCategories(true),
+  ]);
+  // The schedule shown is the selected mailbox's own; on "All accounts" each
+  // mailbox runs on its own times.
+  const settings = selected ? perAccount.get(selected.id) : null;
   const [stats, latest] = await Promise.all([
-    overviewStats(selected?.id ?? null, accounts, settings),
+    overviewStats(selected?.id ?? null, accounts, perAccount),
     withDatabase(() =>
       prisma.message.findMany({ where: scope, orderBy: { processedAt: 'desc' }, take: 8 }),
     ),
@@ -230,8 +236,12 @@ export default async function OverviewPage() {
                 </ul>
               )}
               <p className="mt-3 text-xs text-muted-foreground">
-                Timezone {env.timezone} · runs at {settings.runTimes || 'no scheduled times'}
-                {settings.newMailPollMinutes > 0 ? ` · new mail every ${settings.newMailPollMinutes} min` : ''}
+                Timezone {env.timezone} ·{' '}
+                {settings
+                  ? `runs at ${settings.runTimes || 'no scheduled times'}${
+                      settings.newMailPollMinutes > 0 ? ` · new mail every ${settings.newMailPollMinutes} min` : ''
+                    }`
+                  : 'each mailbox runs on its own schedule'}
               </p>
             </CardContent>
           </Card>

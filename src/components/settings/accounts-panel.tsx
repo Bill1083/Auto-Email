@@ -32,7 +32,10 @@ export function AccountsPanel({
   redirectUri,
   loginRedirectUri,
   loginEmail,
+  loginMailboxConnected,
+  scoped,
 }: {
+  /** The mailboxes to show: just the selected one, or all on "All accounts". */
   accounts: AccountDto[];
   googleConfigured: boolean;
   encryptionConfigured: boolean;
@@ -40,6 +43,10 @@ export function AccountsPanel({
   redirectUri: string;
   loginRedirectUri: string;
   loginEmail: string | null;
+  /** Checked against every mailbox, not just the ones shown. */
+  loginMailboxConnected: boolean;
+  /** True when a single mailbox is selected in the top right. */
+  scoped: boolean;
 }) {
   const router = useRouter();
   const params = useSearchParams();
@@ -69,18 +76,18 @@ export function AccountsPanel({
   }
 
   const canConnect = googleConfigured && encryptionConfigured;
-  const loginMailboxMissing =
-    canConnect && loginEmail !== null && !accounts.some((a) => a.email.toLowerCase() === loginEmail.toLowerCase());
+  const loginMailboxMissing = canConnect && loginEmail !== null && !loginMailboxConnected;
 
   return (
     <Card>
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
-            <CardTitle className="text-base">Mailboxes</CardTitle>
+            <CardTitle className="text-base">{scoped ? 'This mailbox' : 'Mailboxes'}</CardTitle>
             <CardDescription className="mt-1">
-              Each Gmail account is connected with the <code>gmail.modify</code> scope, which can label, archive and
-              trash but never permanently delete.
+              {scoped
+                ? 'The connection for the mailbox selected in the top right. Connect another here, then switch to it from that menu.'
+                : 'Every connected mailbox. Each is connected with the gmail.modify scope, which can label, archive and trash but never permanently delete.'}
             </CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -165,9 +172,8 @@ export function AccountsPanel({
                       <p className="truncate text-sm font-medium">{account.email}</p>
                       <p className="text-xs text-muted-foreground">
                         {account.provider === 'mock' ? 'Demo mailbox' : 'Gmail'} · connected{' '}
-                        {formatRelative(account.createdAt)} · cap{' '}
-                        {account.dailyLimit === null ? 'shared default' : `${account.dailyLimit}/day`} · new
-                        mail checked {formatRelative(account.lastNewLaneAt)} ·{' '}
+                        {formatRelative(account.createdAt)} · new mail checked{' '}
+                        {formatRelative(account.lastNewLaneAt)} ·{' '}
                         {account.backlogBuiltAt
                           ? account.backlogDone
                             ? 'backlog done'

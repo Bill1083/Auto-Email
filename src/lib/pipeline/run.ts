@@ -114,8 +114,8 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     };
   }
 
-  // Scoped to this mailbox: its own profile, learned notes, dry-run state and
-  // backlog query, with the shared settings for everything else.
+  // Every setting belongs to this mailbox: its profile, learned notes, dry
+  // run, cap, backlog scope, model and prices.
   const settings = await getSettings(account.id);
   const lane = options.lane ?? 'both';
   const dailyLimit = effectiveDailyLimit(account, settings);

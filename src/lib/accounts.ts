@@ -197,8 +197,10 @@ export async function ensureAccountLabels(
   provider: MailProvider,
   options: { force?: boolean } = {},
 ): Promise<LabelMap> {
-  const settings = await getSettings();
-  const prefix = account.labelPrefix || settings.labelPrefix || env.labelPrefix;
+  // The prefix is a per-mailbox setting. The account column only records the
+  // prefix the cached label ids were created under.
+  const settings = await getSettings(account.id);
+  const prefix = settings.labelPrefix || env.labelPrefix;
   const categories = await listCategories(true);
 
   const wanted: { key: string; name: string }[] = [
@@ -211,7 +213,8 @@ export async function ensureAccountLabels(
     }
   }
 
-  const existing = parseLabelMap(account.labelMapJson);
+  // A changed prefix means different label names, so the cached ids are stale.
+  const existing = account.labelPrefix === prefix ? parseLabelMap(account.labelMapJson) : {};
   const missing = wanted.filter((w) => !existing[w.key]);
   if (!options.force && missing.length === 0) return existing;
 

@@ -4,12 +4,13 @@ import { CategoriesEditor } from '@/components/rules/categories-editor';
 import { ProfileEditor } from '@/components/rules/profile-editor';
 import { RulesManager } from '@/components/rules/rules-manager';
 import { SuggestionsList } from '@/components/rules/suggestions-list';
+import { ChooseMailbox } from '@/components/shared/choose-mailbox';
 import { PageHeader } from '@/components/stat-card';
 import { isGeminiConfigured } from '@/lib/gemini';
 import { categoryNudges, suggestRules } from '@/lib/pipeline/learning';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { serializeAccount, serializeCategory, serializeRule } from '@/lib/serialize';
-import { getSettings, getSettingsForAccounts } from '@/lib/settings';
+import { getSettings } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,42 +19,53 @@ export const metadata = { title: 'Rules' };
 export default async function RulesPage() {
   const accounts = await listAccounts();
   const { selected, selectedId } = await resolveSelection(accounts);
-  const settings = await getSettings();
+  // Everything on this page follows the mailbox chosen in the top right.
+  const settings = await getSettings(selected?.id ?? null);
 
-  const [perAccount, categories, rules, suggestions, nudges] = await Promise.all([
-    getSettingsForAccounts(accounts.map((account) => account.id)),
+  const [categories, rules, suggestions, nudges] = await Promise.all([
     listCategories(true),
-    withDatabase(() => prisma.rule.findMany({ orderBy: [{ kind: 'asc' }, { createdAt: 'desc' }] })),
+    withDatabase(() =>
+      prisma.rule.findMany({
+        // A mailbox sees its own rules plus the ones that apply to every mailbox.
+        where: selected ? { OR: [{ accountId: null }, { accountId: selected.id }] } : undefined,
+        orderBy: [{ kind: 'asc' }, { createdAt: 'desc' }],
+      }),
+    ),
     suggestRules(selected?.id ?? null, settings.suggestionThreshold),
     categoryNudges(),
   ]);
   const names = Object.fromEntries(categories.map((c) => [c.key, c.name]));
 
-  // Profiles and learned notes are stored per mailbox, so each one is read
-  // against its own account rather than from a shared row.
-  const mailboxes = accounts.map((account) => {
-    const scoped = perAccount.get(account.id);
-    return {
-      id: account.id,
-      email: account.email,
-      profileText: scoped?.profileText ?? '',
-      learnedNotes: scoped?.learnedNotes ?? '',
-      learnedNotesUpdatedAt: scoped?.learnedNotesUpdatedAt ?? '',
-    };
-  });
-
   return (
     <>
       <PageHeader
         title="Rules & preferences"
-        description="What you tell the AI up front, what it has learned from your reviews, and the categories it files into. The profile and learned preferences belong to one mailbox each; rules and categories are shared unless you scope them."
+        description={
+          selected
+            ? `What you tell the AI about ${selected.email}, what it has learned there, and the rules it applies. Switch mailbox in the top right.`
+            : 'Viewing all accounts. Choose a mailbox in the top right to edit its profile and preferences.'
+        }
       />
       <div className="space-y-5">
-        <ProfileEditor
-          mailboxes={mailboxes}
-          defaultId={selected?.id ?? null}
-          geminiConfigured={isGeminiConfigured()}
-        />
+        {selected ? (
+          <ProfileEditor
+            key={selected.id}
+            mailbox={{
+              id: selected.id,
+              email: selected.email,
+              profileText: settings.profileText,
+              learnedNotes: settings.learnedNotes,
+              learnedNotesUpdatedAt: settings.learnedNotesUpdatedAt,
+            }}
+            geminiConfigured={isGeminiConfigured()}
+          />
+        ) : (
+          <ChooseMailbox
+            title="About you"
+            what="profile and learned preferences"
+            hasMailboxes={accounts.length > 0}
+          />
+        )}
         <SuggestionsList
           suggestions={suggestions}
           nudges={nudges}

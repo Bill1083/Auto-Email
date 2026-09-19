@@ -11,7 +11,7 @@
 import { env } from '@/lib/env';
 import { runAccount } from '@/lib/pipeline/run';
 import { prisma, withDatabase } from '@/lib/prisma';
-import { getSettings } from '@/lib/settings';
+import { defaultSettings, getSettingsForAccounts } from '@/lib/settings';
 import { parseRunTimes, scheduledInstantsBetween } from '@/lib/time';
 
 interface SchedulerState {
@@ -51,14 +51,16 @@ export async function tick(state: SchedulerState, now = new Date()): Promise<voi
   if (state.ticking) return;
   state.ticking = true;
   try {
-    const settings = await getSettings();
-    const times = parseRunTimes(settings.runTimes);
     const accounts = await withDatabase(() =>
       prisma.account.findMany({ where: { status: 'ACTIVE' }, orderBy: { createdAt: 'asc' } }),
     );
     if (!accounts.ok) return;
+    // Run times and polling are per mailbox, like every other setting.
+    const perAccount = await getSettingsForAccounts(accounts.data.map((a) => a.id));
 
     for (const account of accounts.data) {
+      const settings = perAccount.get(account.id) ?? defaultSettings();
+      const times = parseRunTimes(settings.runTimes);
       // A restart must not replay every run time missed while the server was
       // down: the window starts at boot for accounts with no recorded run.
       const from = account.lastScheduledRunAt ?? state.bootedAt;

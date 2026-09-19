@@ -7,7 +7,7 @@ import type { Account, Run } from '@prisma/client';
 import { daysToClear, effectiveDailyLimit } from '@/lib/pipeline/budget';
 import { projectedCost } from '@/lib/pipeline/cost';
 import { prisma, withDatabase } from '@/lib/prisma';
-import { dryRunByAccount, type AppSettings } from '@/lib/settings';
+import { defaultSettings, type AppSettings } from '@/lib/settings';
 import {
   dayKey,
   nextScheduledInstant,
@@ -117,10 +117,14 @@ export async function costSummary(accountId: string | null, now = new Date()): P
   };
 }
 
+/**
+ * `perAccount` holds each mailbox's own settings: its cap, run times and dry
+ * run are read from there, never from a shared value.
+ */
 export async function overviewStats(
   accountId: string | null,
   accounts: Account[],
-  settings: AppSettings,
+  perAccount: Map<string, AppSettings>,
   now = new Date(),
 ): Promise<OverviewStats> {
   const todayStart = startOfDayUtc(now);
@@ -161,10 +165,8 @@ export async function overviewStats(
     return { processedToday, awaitingReview, needsAttention, totalProcessed, totalTrashed, recent, lastRun, backlogPending };
   });
 
-  const [cost, dryRunFlags] = await Promise.all([
-    costSummary(accountId, now),
-    dryRunByAccount(scoped.map((account) => account.id)),
-  ]);
+  const cost = await costSummary(accountId, now);
+  const settingsOf = (account: Account) => perAccount.get(account.id) ?? defaultSettings();
 
   const series: DaySeries[] = days.map((day) => ({ day, kept: 0, archived: 0, trashed: 0, attention: 0 }));
   const byDay = new Map(series.map((s) => [s.day, s]));
@@ -180,13 +182,22 @@ export async function overviewStats(
     }
   }
 
-  const dailyLimit = scoped.reduce((sum, account) => sum + effectiveDailyLimit(account, settings), 0);
+  const dailyLimit = scoped.reduce(
+    (sum, account) => sum + effectiveDailyLimit(account, settingsOf(account)),
+    0,
+  );
   const anySnapshot = scoped.some((a) => a.backlogBuiltAt);
   const backlogRemaining = anySnapshot && data.ok ? data.data.backlogPending : null;
   const perDay = dailyLimit;
 
-  const times = parseRunTimes(settings.runTimes);
-  const dryRunAccounts = scoped.filter((account) => dryRunFlags.get(account.id)).length;
+  // Each mailbox keeps its own schedule; the next run is the earliest of them.
+  const nextRunAt =
+    scoped
+      .filter((account) => account.status === 'ACTIVE')
+      .map((account) => nextScheduledInstant(now, parseRunTimes(settingsOf(account).runTimes)))
+      .filter((instant): instant is Date => instant !== null)
+      .sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
+  const dryRunAccounts = scoped.filter((account) => settingsOf(account).dryRun).length;
 
   return {
     processedToday: data.ok ? data.data.processedToday : 0,
@@ -202,7 +213,7 @@ export async function overviewStats(
     cost,
     series,
     lastRun: data.ok ? data.data.lastRun : null,
-    nextRunAt: nextScheduledInstant(now, times),
+    nextRunAt,
     accountsNeedingReauth: scoped.filter((a) => a.status === 'NEEDS_REAUTH').length,
     dryRunAccounts,
     dryRun: dryRunAccounts > 0,

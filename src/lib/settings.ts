@@ -1,16 +1,17 @@
 /**
- * Runtime settings, in two scopes.
+ * Runtime settings, one set per mailbox.
  *
- * Most settings belong to the install as a whole: the model, the prices, the
- * batch size, the run times. A few describe one particular mailbox — the
- * "About you" profile, the preferences learned from corrections on it, whether
- * that mailbox is still in dry run, and what counts as its backlog. Those are
- * stored against the account and are **never** inherited from a global row, so
- * two mailboxes can never end up sharing a profile.
+ * Every setting the dashboard can change belongs to a single mailbox: the
+ * "About you" profile, the learned preferences, dry run, the daily cap, the
+ * run times, the model and prices, all of it. The mailbox chosen in the
+ * top-right switcher is the one being read and edited, and nothing is ever
+ * inherited from another mailbox.
  *
- * A value that has never been written falls back to the `.env` seed, so a
- * fresh install — and every newly connected mailbox — behaves exactly as the
- * env file says, and the UI takes over from there.
+ * A value that has never been written falls back to the `.env` seed, so every
+ * newly connected mailbox starts exactly as the env file says.
+ *
+ * The table's "global" scope holds internal state only (the demo mailbox's
+ * fixture data), never settings.
  */
 
 import { z } from 'zod';
@@ -19,6 +20,7 @@ import { env } from '@/lib/env';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { formatRunTimes, parseRunTimes } from '@/lib/time';
 
+/** Scope for internal, non-setting rows such as the demo mailbox's state. */
 export const GLOBAL_SCOPE = 'global';
 
 export interface AppSettings {
@@ -126,38 +128,11 @@ const CODECS: { [K in keyof AppSettings]: Codec<AppSettings[K]> } = {
 
 const KEYS = Object.keys(CODECS) as (keyof AppSettings)[];
 
-/**
- * Settings stored against one mailbox rather than the whole install.
- *
- * These deliberately do not fall back to a global row. A profile written for
- * one mailbox must never leak into another, so an unset value here means the
- * `.env` default, not "whatever the other mailbox has".
- */
-export const PER_ACCOUNT_KEYS = [
-  'profileText',
-  'learnedNotes',
-  'learnedNotesUpdatedAt',
-  'dryRun',
-  'backlogOrder',
-  'backlogQuery',
-] as const;
-
-export type PerAccountKey = (typeof PER_ACCOUNT_KEYS)[number];
-
-const PER_ACCOUNT = new Set<string>(PER_ACCOUNT_KEYS);
-
-export function isPerAccountKey(key: string): key is PerAccountKey {
-  return PER_ACCOUNT.has(key);
-}
-
-/** Thrown when a per-mailbox setting is written without naming the mailbox. */
+/** Thrown when a setting is written without naming the mailbox it belongs to. */
 export class SettingsScopeError extends Error {
-  readonly key: string;
-
-  constructor(key: string) {
-    super(`"${key}" is a per-mailbox setting; name the mailbox it belongs to.`);
+  constructor() {
+    super('Settings belong to a mailbox. Choose one in the top right first.');
     this.name = 'SettingsScopeError';
-    this.key = key;
   }
 }
 
@@ -170,17 +145,13 @@ export function defaultSettings(): AppSettings {
 }
 
 /**
- * Merge stored rows over the defaults. Pure, so the scoping rule is testable
- * without a database: per-mailbox keys read only from `scoped`, everything
- * else only from `global`.
+ * Merge one mailbox's stored rows over the defaults. Pure, so it is testable
+ * without a database. Unknown keys and values that do not parse are ignored.
  */
-export function resolveSettings(
-  global: Record<string, string>,
-  scoped: Record<string, string> | null,
-): AppSettings {
+export function resolveSettings(stored: Record<string, string>): AppSettings {
   const settings = defaultSettings();
   for (const key of KEYS) {
-    const raw = isPerAccountKey(key) ? scoped?.[key] : global[key];
+    const raw = stored[key];
     if (raw === undefined) continue;
     const parsed = (CODECS[key].parse as (raw: string) => unknown)(raw);
     if (parsed !== undefined) (settings as unknown as Record<string, unknown>)[key] = parsed;
@@ -188,38 +159,18 @@ export function resolveSettings(
   return settings;
 }
 
-function splitRows(
-  rows: { scope: string; key: string; value: string }[],
-): { global: Record<string, string>; byAccount: Map<string, Record<string, string>> } {
-  const global: Record<string, string> = {};
-  const byAccount = new Map<string, Record<string, string>>();
-  for (const row of rows) {
-    if (row.scope === GLOBAL_SCOPE) {
-      global[row.key] = row.value;
-      continue;
-    }
-    const entry = byAccount.get(row.scope) ?? {};
-    entry[row.key] = row.value;
-    byAccount.set(row.scope, entry);
-  }
-  return { global, byAccount };
-}
-
 /**
- * Settings as they apply to one mailbox. Called without an account id it
- * returns the global settings, with `.env` defaults for the per-mailbox keys.
+ * One mailbox's settings. Without a mailbox (the "All accounts" view) there is
+ * nothing to read, so the `.env` defaults are returned.
  */
 export async function getSettings(accountId?: string | null): Promise<AppSettings> {
-  const scopes = accountId ? [GLOBAL_SCOPE, accountId] : [GLOBAL_SCOPE];
-  const rows = await withDatabase(() =>
-    prisma.setting.findMany({ where: { scope: { in: scopes } } }),
-  );
+  if (!accountId) return defaultSettings();
+  const rows = await withDatabase(() => prisma.setting.findMany({ where: { scope: accountId } }));
   if (!rows.ok) return defaultSettings();
-  const { global, byAccount } = splitRows(rows.data);
-  return resolveSettings(global, accountId ? (byAccount.get(accountId) ?? {}) : null);
+  return resolveSettings(Object.fromEntries(rows.data.map((row) => [row.key, row.value])));
 }
 
-/** The same, for several mailboxes at once, in a single query. */
+/** Several mailboxes' settings in a single query. */
 export async function getSettingsForAccounts(
   accountIds: string[],
 ): Promise<Map<string, AppSettings>> {
@@ -227,37 +178,34 @@ export async function getSettingsForAccounts(
   if (accountIds.length === 0) return out;
 
   const rows = await withDatabase(() =>
-    prisma.setting.findMany({ where: { scope: { in: [GLOBAL_SCOPE, ...accountIds] } } }),
+    prisma.setting.findMany({ where: { scope: { in: accountIds } } }),
   );
-  const { global, byAccount } = splitRows(rows.ok ? rows.data : []);
-  for (const id of accountIds) {
-    out.set(id, resolveSettings(global, byAccount.get(id) ?? {}));
+  const byAccount = new Map<string, Record<string, string>>();
+  for (const row of rows.ok ? rows.data : []) {
+    const entry = byAccount.get(row.scope) ?? {};
+    entry[row.key] = row.value;
+    byAccount.set(row.scope, entry);
   }
+  for (const id of accountIds) out.set(id, resolveSettings(byAccount.get(id) ?? {}));
   return out;
 }
 
-/**
- * Write a patch. Global keys go to the shared scope; per-mailbox keys need an
- * account id and are rejected without one rather than silently going global.
- */
+/** Write a patch to one mailbox. Refused without a mailbox, never written globally. */
 export async function updateSettings(
   patch: Partial<AppSettings>,
-  accountId?: string | null,
+  accountId: string | null | undefined,
 ): Promise<AppSettings> {
+  if (!accountId) throw new SettingsScopeError();
+
   const writes = [];
   for (const key of KEYS) {
     const value = patch[key];
     if (value === undefined) continue;
-
-    const perAccount = isPerAccountKey(key);
-    if (perAccount && !accountId) throw new SettingsScopeError(key);
-    const scope = perAccount ? (accountId as string) : GLOBAL_SCOPE;
-
     const serialized = (CODECS[key].serialize as (value: unknown) => string)(value);
     writes.push(
       prisma.setting.upsert({
-        where: { scope_key: { scope, key } },
-        create: { scope, key, value: serialized },
+        where: { scope_key: { scope: accountId, key } },
+        create: { scope: accountId, key, value: serialized },
         update: { value: serialized },
       }),
     );
@@ -271,16 +219,10 @@ export async function deleteAccountSettings(accountId: string): Promise<void> {
   await withDatabase(() => prisma.setting.deleteMany({ where: { scope: accountId } }));
 }
 
-/** Whether each mailbox is still in dry run, for the dashboard tiles. */
+/** Whether each mailbox is still in dry run. */
 export async function dryRunByAccount(accountIds: string[]): Promise<Map<string, boolean>> {
-  const out = new Map<string, boolean>(accountIds.map((id) => [id, env.dryRun]));
-  if (accountIds.length === 0) return out;
-  const rows = await withDatabase(() =>
-    prisma.setting.findMany({ where: { key: 'dryRun', scope: { in: accountIds } } }),
-  );
-  if (!rows.ok) return out;
-  for (const row of rows.data) out.set(row.scope, row.value === 'true');
-  return out;
+  const settings = await getSettingsForAccounts(accountIds);
+  return new Map(accountIds.map((id) => [id, settings.get(id)?.dryRun ?? env.dryRun]));
 }
 
 /** Request body contract for PATCH /api/settings. */

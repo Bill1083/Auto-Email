@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
-// The scoping rule is pure; no database is needed to exercise it.
+// No database: resolution is pure, and a write without a mailbox is refused
+// before the database is ever touched.
 vi.mock('@/lib/prisma', () => ({
   prisma: {},
   withDatabase: async () => ({ ok: false, error: 'mocked' }),
@@ -8,80 +9,72 @@ vi.mock('@/lib/prisma', () => ({
 }));
 
 import {
-  PER_ACCOUNT_KEYS,
+  SettingsScopeError,
   defaultSettings,
-  isPerAccountKey,
+  getSettings,
   resolveSettings,
+  updateSettings,
 } from '@/lib/settings';
 
-describe('per-mailbox keys', () => {
-  it('covers the settings that describe one mailbox', () => {
-    expect([...PER_ACCOUNT_KEYS].sort()).toEqual(
-      ['backlogOrder', 'backlogQuery', 'dryRun', 'learnedNotes', 'learnedNotesUpdatedAt', 'profileText'].sort(),
-    );
-    expect(isPerAccountKey('profileText')).toBe(true);
-    expect(isPerAccountKey('geminiModel')).toBe(false);
-  });
-});
-
 describe('resolveSettings', () => {
-  it('falls back to the defaults when nothing is stored', () => {
-    expect(resolveSettings({}, {})).toEqual(defaultSettings());
+  it('falls back to the defaults when a mailbox has nothing stored', () => {
+    expect(resolveSettings({})).toEqual(defaultSettings());
   });
 
-  it('reads a mailbox profile from that mailbox only', () => {
-    const work = resolveSettings({}, { profileText: 'Work: clients and invoices matter.' });
-    const personal = resolveSettings({}, { profileText: 'Personal: friends and family.' });
+  it('keeps two mailboxes completely independent', () => {
+    const work = resolveSettings({
+      profileText: 'Work: clients and invoices matter.',
+      dryRun: 'false',
+      geminiModel: 'gemini-2.5-flash',
+      runTimes: '08:00',
+    });
+    const personal = resolveSettings({
+      profileText: 'Personal: friends and family.',
+      dryRun: 'true',
+      geminiModel: 'gemini-2.5-flash-lite',
+      runTimes: '20:00',
+    });
     expect(work.profileText).toBe('Work: clients and invoices matter.');
     expect(personal.profileText).toBe('Personal: friends and family.');
+    expect(work.dryRun).toBe(false);
+    expect(personal.dryRun).toBe(true);
+    expect(work.geminiModel).toBe('gemini-2.5-flash');
+    expect(personal.geminiModel).toBe('gemini-2.5-flash-lite');
+    expect(work.runTimes).toBe('08:00');
+    expect(personal.runTimes).toBe('20:00');
   });
 
-  it('never inherits a per-mailbox value from the global scope', () => {
-    // A profile written before settings were split must not leak into every
-    // mailbox: this is the whole point of the per-account scope.
-    const global = {
-      profileText: 'Left over from when the profile was shared.',
-      learnedNotes: '- shared note',
-      dryRun: 'false',
-      backlogQuery: 'in:inbox',
-    };
-    const resolved = resolveSettings(global, {});
-    expect(resolved.profileText).toBe('');
-    expect(resolved.learnedNotes).toBe('');
-    expect(resolved.dryRun).toBe(defaultSettings().dryRun);
-    expect(resolved.backlogQuery).toBe(defaultSettings().backlogQuery);
-  });
-
-  it('leaves per-mailbox values at their defaults when no mailbox is named', () => {
-    const resolved = resolveSettings({ geminiModel: 'gemini-2.5-flash-lite' }, null);
-    expect(resolved.geminiModel).toBe('gemini-2.5-flash-lite');
-    expect(resolved.profileText).toBe('');
-  });
-
-  it('reads shared keys from the global scope only', () => {
-    const resolved = resolveSettings(
-      { geminiModel: 'gemini-2.5-flash-lite', aiBatchSize: '25' },
-      // A stray account-scoped row for a shared key must be ignored rather
-      // than letting one mailbox change the model for everyone.
-      { geminiModel: 'something-else', aiBatchSize: '1' },
-    );
-    expect(resolved.geminiModel).toBe('gemini-2.5-flash-lite');
-    expect(resolved.aiBatchSize).toBe(25);
-  });
-
-  it('keeps each mailbox its own dry-run state', () => {
-    expect(resolveSettings({}, { dryRun: 'false' }).dryRun).toBe(false);
-    expect(resolveSettings({}, { dryRun: 'true' }).dryRun).toBe(true);
+  it('ignores keys that are not settings, such as demo mailbox state', () => {
+    const resolved = resolveSettings({ 'mock:demo@automail.local': '{"labels":{}}' });
+    expect(resolved).toEqual(defaultSettings());
   });
 
   it('ignores values that do not parse', () => {
-    const resolved = resolveSettings({ aiBatchSize: 'not a number' }, { backlogOrder: 'sideways' });
+    const resolved = resolveSettings({ aiBatchSize: 'not a number', backlogOrder: 'sideways', dryRun: 'maybe' });
     expect(resolved.aiBatchSize).toBe(defaultSettings().aiBatchSize);
     expect(resolved.backlogOrder).toBe(defaultSettings().backlogOrder);
+    expect(resolved.dryRun).toBe(defaultSettings().dryRun);
   });
 
   it('clamps stored numbers to their allowed range', () => {
-    expect(resolveSettings({ aiBatchSize: '9999' }, {}).aiBatchSize).toBe(50);
-    expect(resolveSettings({ autoTrashMinConfidence: '-5' }, {}).autoTrashMinConfidence).toBe(0);
+    expect(resolveSettings({ aiBatchSize: '9999' }).aiBatchSize).toBe(50);
+    expect(resolveSettings({ autoTrashMinConfidence: '-5' }).autoTrashMinConfidence).toBe(0);
+  });
+
+  it('normalises run times', () => {
+    expect(resolveSettings({ runTimes: '19:00, 7:00, 07:00, nonsense' }).runTimes).toBe('07:00,19:00');
+  });
+});
+
+describe('scoping', () => {
+  it('returns the defaults on "All accounts" without reading anything', async () => {
+    expect(await getSettings(null)).toEqual(defaultSettings());
+    expect(await getSettings(undefined)).toEqual(defaultSettings());
+  });
+
+  it('refuses to write without a mailbox rather than writing globally', async () => {
+    await expect(updateSettings({ profileText: 'x' }, null)).rejects.toBeInstanceOf(SettingsScopeError);
+    await expect(updateSettings({ geminiModel: 'x' }, undefined)).rejects.toBeInstanceOf(SettingsScopeError);
+    await expect(updateSettings({ dryRun: false }, '')).rejects.toBeInstanceOf(SettingsScopeError);
   });
 });
