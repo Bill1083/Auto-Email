@@ -156,7 +156,10 @@ export default async function OverviewPage() {
           />
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        {/* The explicit minmax(0,...) matters on one column too: a bare `1fr`
+            floors at min-content, so the chart or a long error line would push
+            the whole page wider than a phone screen. */}
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Last 14 days</CardTitle>
@@ -227,7 +230,13 @@ export default async function OverviewPage() {
                           : 'backlog not started'}
                       </p>
                       {account.lastError ? (
-                        <p className="mt-1 truncate text-xs text-danger" title={account.lastError}>
+                        // Wrapped, not truncated: `truncate` sets white-space
+                        // nowrap, and a long provider error then sets the
+                        // column's minimum width to the length of the message.
+                        <p
+                          className="mt-1 line-clamp-3 break-words text-xs text-danger"
+                          title={account.lastError}
+                        >
                           {account.lastError}
                         </p>
                       ) : null}

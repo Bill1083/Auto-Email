@@ -226,7 +226,18 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     const emails: { email: RawEmail; lane: Lane }[] = [];
     const gone: string[] = [];
     for (const candidate of candidates) {
-      const email = await provider.fetch(candidate.id, settings.maxBodyChars);
+      let email: RawEmail | null;
+      try {
+        email = await provider.fetch(candidate.id, settings.maxBodyChars);
+      } catch (error) {
+        // A mailbox that is rate limiting will not recover inside this run, so
+        // stop fetching and finish with what is already in hand rather than
+        // throwing away the whole batch. The rest is picked up next run.
+        if (error instanceof ReauthRequiredError) throw error;
+        partialError = error instanceof Error ? error.message : 'The mailbox stopped responding.';
+        console.warn(`[automail] fetch stopped early for ${account.email}: ${partialError}`);
+        break;
+      }
       if (!email) {
         gone.push(candidate.id);
         continue;

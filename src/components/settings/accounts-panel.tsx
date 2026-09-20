@@ -190,7 +190,9 @@ export function AccountsPanel({
                     </Badge>
                   </div>
                   {account.lastError ? (
-                    <p className="mt-2 rounded bg-danger/10 px-2 py-1 text-xs text-danger">{account.lastError}</p>
+                    <p className="mt-2 break-words rounded bg-danger/10 px-2 py-1 text-xs text-danger">
+                      {account.lastError}
+                    </p>
                   ) : null}
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <span className="ml-auto flex flex-wrap gap-1.5">

@@ -18,7 +18,9 @@ import { bodyTextOf, cleanBody, parseGmailMessage, type GmailMessage } from '@/l
 import type { RawEmail } from '@/lib/types';
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
-const MAX_ATTEMPTS = 4;
+// Quota windows are per minute, so the last few waits need to be long enough
+// to cross one: 1s, 2s, 4s, 8s, 16s, 32s.
+const MAX_ATTEMPTS = 6;
 
 export interface TokenSupplier {
   /** A valid access token; `forceRefresh` after a 401. */
@@ -33,6 +35,44 @@ interface GmailLabel {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Gmail reports rate and quota limits as 403, not 429, so a 403 has to be read
+ * before deciding whether it is permanent. These are the retryable ones.
+ */
+const QUOTA_ERROR =
+  /rateLimitExceeded|userRateLimitExceeded|quota ?exceeded|too many concurrent|backendError|Resource has been exhausted/i;
+
+export function isRetryableQuotaError(detail: string): boolean {
+  return QUOTA_ERROR.test(detail);
+}
+
+/**
+ * Smooths bursts across every request this process makes. A run with a large
+ * daily cap fetches hundreds of messages back to back, which is exactly what
+ * trips Gmail's per-minute quota; spacing them costs a few seconds and keeps
+ * the run well inside it.
+ */
+const MIN_REQUEST_GAP_MS = 60;
+let nextSlot = 0;
+
+/**
+ * Google's documented remedy for a quota error: exponential backoff with
+ * jitter, honouring Retry-After when it is sent.
+ */
+export function backoffMs(attempt: number, retryAfter?: string | null): number {
+  const seconds = Number(retryAfter ?? '');
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(60_000, seconds * 1000);
+  const base = Math.min(32_000, 1_000 * 2 ** (attempt - 1));
+  return base + Math.floor(Math.random() * 500);
+}
+
+async function takeSlot(): Promise<void> {
+  const now = Date.now();
+  const at = Math.max(now, nextSlot);
+  nextSlot = at + MIN_REQUEST_GAP_MS;
+  if (at > now) await sleep(at - now);
 }
 
 export class GmailClient implements MailProvider {
@@ -56,6 +96,7 @@ export class GmailClient implements MailProvider {
 
     let refreshed = false;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      await takeSlot();
       const token = await this.tokens.getAccessToken(refreshed && attempt > 1 ? false : undefined);
       let response: Response;
       try {
@@ -93,7 +134,19 @@ export class GmailClient implements MailProvider {
         if (response.status === 401 || /insufficient|ACCESS_TOKEN_SCOPE_INSUFFICIENT|PERMISSION_DENIED/i.test(detail)) {
           throw new ReauthRequiredError(`Gmail rejected the connection (${response.status}): ${detail}`);
         }
-        throw new ProviderError(`Gmail refused the request (403): ${detail}`, 403);
+        // Gmail answers a quota or rate limit with 403 rather than 429, so a
+        // 403 is only permanent once its message says something else.
+        if (!isRetryableQuotaError(detail)) {
+          throw new ProviderError(`Gmail refused the request (403): ${detail}`, 403);
+        }
+        if (attempt === MAX_ATTEMPTS) {
+          throw new ProviderError(
+            `Gmail is still rate limiting after ${MAX_ATTEMPTS} attempts: ${detail}`,
+            429,
+          );
+        }
+        await sleep(backoffMs(attempt, response.headers.get('retry-after')));
+        continue;
       }
 
       if (response.status === 429 || response.status >= 500) {
@@ -103,8 +156,7 @@ export class GmailClient implements MailProvider {
             response.status,
           );
         }
-        const retryAfter = Number(response.headers.get('retry-after') ?? '');
-        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 800 * 2 ** (attempt - 1));
+        await sleep(backoffMs(attempt, response.headers.get('retry-after')));
         continue;
       }
 

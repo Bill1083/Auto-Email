@@ -123,7 +123,9 @@ export function ActivityChart({ series }: { series: DaySeries[] }) {
   }
 
   return (
-    <div className="relative h-56 w-full">
+    // min-w-0 lets the chart shrink with its column, and overflow-hidden keeps
+    // Recharts from reporting a width the layout then has to grow to.
+    <div className="relative h-56 w-full min-w-0 overflow-hidden">
       <ToggleRow table={table} setTable={setTable} />
       {empty ? (
         <p className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
