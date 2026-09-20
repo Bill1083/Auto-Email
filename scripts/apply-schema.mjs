@@ -141,6 +141,29 @@ async function moveSettingsOntoMailboxes(prisma) {
   return true;
 }
 
+/**
+ * Runs report live progress so the dashboard can show what a long indexing
+ * pass is doing. Plain ADD COLUMNs, which SQLite does in place.
+ */
+async function addRunProgress(prisma) {
+  const columns = await columnNames(prisma, 'runs');
+  const wanted = [
+    ['phase', `TEXT NOT NULL DEFAULT 'queued'`],
+    ['progressDone', 'INTEGER NOT NULL DEFAULT 0'],
+    ['progressTotal', 'INTEGER NOT NULL DEFAULT 0'],
+  ];
+  const missing = wanted.filter(([name]) => !columns.has(name));
+  if (missing.length === 0) return false;
+
+  for (const [name, definition] of missing) {
+    await prisma.$executeRawUnsafe(`ALTER TABLE "runs" ADD COLUMN "${name}" ${definition}`);
+  }
+  // Anything already finished is done; anything still marked RUNNING was
+  // interrupted by this restart and will never report progress again.
+  await prisma.$executeRawUnsafe(`UPDATE "runs" SET "phase" = 'done' WHERE "status" != 'RUNNING'`);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 
 async function main() {
@@ -162,6 +185,9 @@ async function main() {
     }
     if (await moveSettingsOntoMailboxes(prisma)) {
       console.log('[automail] migrated: shared settings copied onto each mailbox');
+    }
+    if (await addRunProgress(prisma)) {
+      console.log('[automail] migrated: runs now record live progress');
     }
   } finally {
     await prisma.$disconnect();

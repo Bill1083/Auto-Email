@@ -14,7 +14,9 @@ import {
 import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { listCategories } from '@/lib/categories';
 import { ActivityChart } from '@/components/overview/activity-chart';
+import { LiveProvider, LiveStatCard, RunProgress } from '@/components/overview/live-status';
 import { SetupChecklist } from '@/components/overview/setup-checklist';
+import type { LiveResponse } from '@/app/api/live/route';
 import { ActionBadge, CategoryBadge, ConfidenceMeter, DecidedByBadge } from '@/components/shared/badges';
 import { EmptyState } from '@/components/shared/empty-state';
 import { RunNowButton } from '@/components/shared/run-now-button';
@@ -55,6 +57,41 @@ export default async function OverviewPage() {
   const emailById = new Map(accounts.map((a) => [a.id, a.email]));
   const running = accounts.some((a) => isRunning(a.id));
 
+  // Seeds the live poller so the tiles and the bar are right on first paint,
+  // before the first poll comes back.
+  const activeRun =
+    stats.lastRun && stats.lastRun.status === 'RUNNING' && isRunning(stats.lastRun.accountId)
+      ? stats.lastRun
+      : null;
+  const initialLive: LiveResponse = {
+    run: activeRun
+      ? {
+          id: activeRun.id,
+          accountId: activeRun.accountId,
+          accountEmail: emailById.get(activeRun.accountId) ?? '',
+          phase: activeRun.phase,
+          done: activeRun.progressDone,
+          total: activeRun.progressTotal,
+          startedAt: activeRun.startedAt.toISOString(),
+          dryRun: activeRun.dryRun,
+        }
+      : null,
+    awaitingReview: stats.awaitingReview,
+    needsAttention: stats.needsAttention,
+    processedToday: stats.processedToday,
+    dailyLimit: stats.dailyLimit,
+    lastFinished:
+      stats.lastRun && stats.lastRun.status !== 'RUNNING'
+        ? {
+            id: stats.lastRun.id,
+            status: stats.lastRun.status,
+            error: stats.lastRun.error,
+            fetched: stats.lastRun.fetched,
+            dryRun: stats.lastRun.dryRun,
+          }
+        : null,
+  };
+
   const backlogHint =
     stats.backlogRemaining === null
       ? 'Snapshot is taken on the first run'
@@ -63,7 +100,9 @@ export default async function OverviewPage() {
         : `${stats.backlogDaysToClear ?? '∞'} day${stats.backlogDaysToClear === 1 ? '' : 's'} at the current cap`;
 
   return (
-    <>
+    // Wraps the header too, so Run now reflects a run started anywhere,
+    // including one the scheduler began on its own.
+    <LiveProvider accountId={selectedId} initial={initialLive}>
       <PageHeader
         title={selected ? selected.email : 'All mailboxes'}
         description={
@@ -98,27 +137,38 @@ export default async function OverviewPage() {
           needsReauth={stats.accountsNeedingReauth}
         />
 
+        {/* Only present while a run is working. */}
+        <RunProgress showMailbox={!selected} />
+
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatCard
+          <LiveStatCard
             label="Processed today"
-            value={`${formatInt(stats.processedToday)} / ${formatInt(stats.dailyLimit)}`}
+            field="processedToday"
+            initial={stats.processedToday}
+            suffix={` / ${formatInt(stats.dailyLimit)}`}
             hint={stats.processedToday >= stats.dailyLimit && stats.dailyLimit > 0 ? 'Daily cap reached' : 'Daily cap across new mail and backlog'}
-            icon={Mail}
+            icon="mail"
             tone={stats.processedToday >= stats.dailyLimit && stats.dailyLimit > 0 ? 'muted' : 'default'}
           />
-          <StatCard
+          <LiveStatCard
             label="Awaiting your review"
-            value={formatInt(stats.awaitingReview)}
-            hint={stats.awaitingReview > 0 ? 'Proposed deletions to confirm' : 'Delete queue is empty'}
-            icon={ListChecks}
-            tone={stats.awaitingReview > 0 ? 'warning' : 'muted'}
+            field="awaitingReview"
+            initial={stats.awaitingReview}
+            hint="Proposed deletions to confirm"
+            zeroHint="Delete queue is empty"
+            icon="review"
+            tone="warning"
+            zeroTone="muted"
           />
-          <StatCard
+          <LiveStatCard
             label="Needs attention"
-            value={formatInt(stats.needsAttention)}
-            hint={stats.needsAttention > 0 ? 'Flagged for you to read or act on' : 'Nothing flagged'}
-            icon={TriangleAlert}
-            tone={stats.needsAttention > 0 ? 'danger' : 'muted'}
+            field="needsAttention"
+            initial={stats.needsAttention}
+            hint="Flagged for you to read or act on"
+            zeroHint="Nothing flagged"
+            icon="attention"
+            tone="danger"
+            zeroTone="muted"
           />
           <StatCard
             label="Backlog remaining"
@@ -311,6 +361,6 @@ export default async function OverviewPage() {
           keeps mail for 30 days. {plural(accounts.length, 'mailbox', 'mailboxes')} connected.
         </p>
       </div>
-    </>
+    </LiveProvider>
   );
 }

@@ -157,7 +157,21 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     await withDatabase(() =>
       prisma.run.update({
         where: { id: run.id },
-        data: { status, error, finishedAt: new Date(), ...counts },
+        data: { status, error, finishedAt: new Date(), phase: 'done', ...counts },
+      }),
+    );
+  };
+
+  /**
+   * Live progress for the dashboard. Best effort and never awaited for
+   * correctness: a missed write only costs one tick of the progress bar.
+   * `total` is 0 while it is still unknown, which the UI shows as indefinite.
+   */
+  const progress = async (phase: string, done: number, total: number) => {
+    await withDatabase(() =>
+      prisma.run.update({
+        where: { id: run.id },
+        data: { phase, progressDone: done, progressTotal: total },
       }),
     );
   };
@@ -218,14 +232,24 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       candidates.push(...ids.map((id) => ({ id, lane: 'new' as const })));
     }
     if ((lane === 'backlog' || lane === 'both') && candidates.length < budget && !account.backlogDone) {
-      const ids = await collectBacklogIds(account, provider, settings, budget - candidates.length);
+      const ids = await collectBacklogIds(account, provider, settings, budget - candidates.length, {
+        // Indexing a large mailbox is the longest silent stretch of a first
+        // run, so it reports the ids found so far against no known total.
+        onIndexed: (found) => progress('indexing', found, 0),
+      });
       candidates.push(...ids.map((id) => ({ id, lane: 'backlog' as const })));
     }
 
     // --- Fetch -------------------------------------------------------------
     const emails: { email: RawEmail; lane: Lane }[] = [];
     const gone: string[] = [];
+    await progress('reading', 0, candidates.length);
     for (const candidate of candidates) {
+      // Every tenth message is often enough to look alive without writing on
+      // every single fetch.
+      if ((emails.length + gone.length) % 10 === 0 && emails.length + gone.length > 0) {
+        await progress('reading', emails.length + gone.length, candidates.length);
+      }
       let email: RawEmail | null;
       try {
         email = await provider.fetch(candidate.id, settings.maxBodyChars);
@@ -293,6 +317,8 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       };
       const systemInstruction = buildSystemInstruction(ctx);
       let usage = { ...ZERO_USAGE };
+      let sorted = 0;
+      await progress('sorting', 0, needsAi.length);
 
       for (const batch of chunk(needsAi, settings.aiBatchSize)) {
         const batchEmails = batch.map((b) => b.email);
@@ -348,11 +374,14 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
           }
           prepared.push({ email: item.email, lane: item.lane, decision, rule: item.rule });
         }
+        sorted += batch.length;
+        await progress('sorting', sorted, needsAi.length);
       }
     }
 
     // --- Plan, apply, persist (in chunks so a mid-run failure loses little) --
     const ruleHits = new Map<string, number>();
+    await progress('applying', 0, prepared.length);
     for (const group of chunk(prepared, 25)) {
       const planned = group.map((item) => {
         const plan = planChanges({
@@ -432,6 +461,9 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
             break;
         }
       }
+
+      // Written after the chunk lands, so the tiles and the bar move together.
+      await progress('applying', persisted, prepared.length);
 
       const backlogIds = group.filter((g) => g.lane === 'backlog').map((g) => g.email.id);
       if (backlogIds.length > 0) {
@@ -578,9 +610,10 @@ async function collectBacklogIds(
   provider: MailProvider,
   settings: AppSettings,
   limit: number,
+  hooks: { onIndexed?: (found: number) => Promise<void> } = {},
 ): Promise<string[]> {
   if (!account.backlogBuiltAt) {
-    await buildBacklogSnapshot(account, provider, settings);
+    await buildBacklogSnapshot(account, provider, settings, hooks.onIndexed);
   }
 
   const ids: string[] = [];
@@ -623,6 +656,7 @@ async function buildBacklogSnapshot(
   account: Account,
   provider: MailProvider,
   settings: AppSettings,
+  onIndexed?: (found: number) => Promise<void>,
 ): Promise<void> {
   const cutoff = account.lastSyncAt ?? account.createdAt;
   const query = `${settings.backlogQuery} before:${epochSeconds(cutoff) + 1}`.trim();
@@ -638,6 +672,7 @@ async function buildBacklogSnapshot(
     if (page.ids.length > 0) {
       const rows = page.ids.map((gmailId) => ({ accountId: account.id, gmailId, position: position++ }));
       await withDatabase(() => prisma.backlogItem.createMany({ data: rows }));
+      await onIndexed?.(position);
     }
     pageToken = page.nextPageToken;
   } while (pageToken && pages < MAX_SNAPSHOT_PAGES);

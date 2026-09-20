@@ -6,6 +6,7 @@ import { Loader2, Play } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
+import { useLive } from '@/components/overview/live-status';
 import { api, errorMessage } from '@/lib/client';
 
 interface RunsResponse {
@@ -35,8 +36,12 @@ export function RunNowButton({
   initiallyRunning?: boolean;
 }) {
   const router = useRouter();
+  // On a page that already watches runs (the Overview), let that do the
+  // polling and the reporting rather than duplicating both here.
+  const live = useLive();
   const [running, setRunning] = useState(initiallyRunning);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const busy = live ? live.running : running;
 
   useEffect(() => {
     return () => {
@@ -73,7 +78,8 @@ export function RunNowButton({
     setRunning(true);
     try {
       await api('/api/runs', { method: 'POST', json: { accountId, lane } });
-      timer.current = setTimeout(() => void poll(), 1_500);
+      if (live) live.refreshNow();
+      else timer.current = setTimeout(() => void poll(), 1_500);
     } catch (error) {
       setRunning(false);
       toast.error(errorMessage(error));
@@ -81,9 +87,9 @@ export function RunNowButton({
   }
 
   return (
-    <Button onClick={start} disabled={disabled || running} variant={variant} size={size}>
-      {running ? <Loader2 className="animate-spin" /> : <Play />}
-      {running ? 'Running…' : label}
+    <Button onClick={start} disabled={disabled || busy} variant={variant} size={size}>
+      {busy ? <Loader2 className="animate-spin" /> : <Play />}
+      {busy ? 'Running…' : label}
     </Button>
   );
 }
