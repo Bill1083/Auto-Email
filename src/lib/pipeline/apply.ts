@@ -99,23 +99,58 @@ export function planChanges(input: PlanInput): Plan {
   };
 }
 
+export interface LabelOp<T> {
+  item: T;
+  add: string[];
+  remove: string[];
+}
+
+export interface LabelGroup<T> {
+  add: string[];
+  remove: string[];
+  items: T[];
+}
+
+/**
+ * Collapse per-message label changes into the fewest `modify` calls: emails
+ * getting the same labels added and removed travel together. Pure, because the
+ * difference between one call and three hundred is what keeps a bulk action
+ * inside a request timeout, and that is worth testing directly.
+ *
+ * `untouched` are the items with nothing to change, which still count as done.
+ */
+export function groupLabelOps<T>(ops: LabelOp<T>[]): { groups: LabelGroup<T>[]; untouched: T[] } {
+  const groups = new Map<string, LabelGroup<T>>();
+  const untouched: T[] = [];
+  for (const op of ops) {
+    const add = [...new Set(op.add)].sort();
+    const remove = [...new Set(op.remove)].sort();
+    if (add.length === 0 && remove.length === 0) {
+      untouched.push(op.item);
+      continue;
+    }
+    const key = `${add.join(',')}|${remove.join(',')}`;
+    const group = groups.get(key) ?? { add, remove, items: [] };
+    group.items.push(op.item);
+    groups.set(key, group);
+  }
+  return { groups: [...groups.values()], untouched };
+}
+
 /** Apply a batch of plans with as few provider calls as possible. */
 export async function executePlans(
   provider: MailProvider,
   items: { id: string; changes: AppliedChanges }[],
 ): Promise<void> {
-  const groups = new Map<string, { add: string[]; remove: string[]; ids: string[] }>();
-  for (const item of items) {
-    const add = [...item.changes.addedLabelIds].sort();
-    const remove = [...item.changes.removedLabelIds].sort();
-    if (add.length === 0 && remove.length === 0) continue;
-    const key = `${add.join(',')}|${remove.join(',')}`;
-    const group = groups.get(key) ?? { add, remove, ids: [] };
-    group.ids.push(item.id);
-    groups.set(key, group);
-  }
-  for (const group of groups.values()) {
-    await provider.modify(group.ids, group.add, group.remove);
+  const { groups } = groupLabelOps(
+    items.map((item) => ({
+      item: item.id,
+      add: item.changes.addedLabelIds,
+      remove: item.changes.removedLabelIds,
+    })),
+  );
+  for (const group of groups) {
+    await provider.modify(group.items, group.add, group.remove);
   }
   for (const item of items) {
     if (item.changes.trashed) await provider.trash(item.id);

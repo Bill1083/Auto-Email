@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { MailProvider } from '@/lib/mail/provider';
-import { executePlans, planChanges, revertChanges } from '@/lib/pipeline/apply';
+import { executePlans, groupLabelOps, planChanges, revertChanges } from '@/lib/pipeline/apply';
 import type { AppliedChanges } from '@/lib/types';
 
 const labelMap = {
@@ -122,5 +122,42 @@ describe('revertChanges', () => {
     const provider = new FakeProvider();
     await revertChanges(provider, 'a', { addedLabelIds: ['L1', 'STARRED'], removedLabelIds: ['INBOX'], trashed: true, starred: true });
     expect(provider.calls).toEqual(['untrash a', 'modify a add=INBOX remove=L1,STARRED']);
+  });
+});
+
+describe('groupLabelOps', () => {
+  it('collapses matching change sets so a bulk action costs a handful of calls', () => {
+    const ops = Array.from({ length: 300 }, (_, i) => ({
+      item: `m${i}`,
+      add: i % 2 === 0 ? ['Label_promo'] : ['Label_finance'],
+      remove: ['INBOX'],
+    }));
+    const { groups, untouched } = groupLabelOps(ops);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].items).toHaveLength(150);
+    expect(groups[1].items).toHaveLength(150);
+    expect(untouched).toEqual([]);
+  });
+
+  it('ignores the order labels were listed in', () => {
+    const { groups } = groupLabelOps([
+      { item: 'a', add: ['x', 'y'], remove: [] },
+      { item: 'b', add: ['y', 'x'], remove: [] },
+      { item: 'c', add: ['y', 'x', 'y'], remove: [] },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].items).toEqual(['a', 'b', 'c']);
+    expect(groups[0].add).toEqual(['x', 'y']);
+  });
+
+  it('separates the items with nothing to change, which still count as done', () => {
+    const { groups, untouched } = groupLabelOps([
+      { item: 'a', add: [], remove: [] },
+      { item: 'b', add: ['x'], remove: [] },
+      { item: 'c', add: [], remove: [] },
+    ]);
+    expect(untouched).toEqual(['a', 'c']);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].items).toEqual(['b']);
   });
 });

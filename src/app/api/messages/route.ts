@@ -8,18 +8,44 @@ import { serializeMessage } from '@/lib/serialize';
 
 export const dynamic = 'force-dynamic';
 
+/** The most ids one `fields=ids` answer will carry. */
+const MAX_IDS = 5_000;
+
 /**
  * GET /api/messages?view=review|attention|deleted|all&accountId&action&category&decidedBy&status&q&days&page&pageSize
+ *
+ * With `fields=ids` it answers with every matching id instead of a page of
+ * rows, which is how a bulk action covers the whole queue rather than only
+ * the page the user happens to be looking at.
  */
 export async function GET(request: Request) {
   return guard(async () => {
-    const query = parseMessageQuery(new URL(request.url).searchParams);
+    const params = new URL(request.url).searchParams;
+    const query = parseMessageQuery(params);
     const accounts = await listAccounts();
-    if (!query.accountId && !new URL(request.url).searchParams.get('accountId')) {
+    if (!query.accountId && !params.get('accountId')) {
       const selection = await resolveSelection(accounts);
       query.accountId = selection.selected?.id ?? null;
     }
     const where = messageWhere(query);
+
+    if (params.get('fields') === 'ids') {
+      const idResult = await withDatabase(async () => {
+        const [total, rows] = await Promise.all([
+          prisma.message.count({ where }),
+          prisma.message.findMany({
+            where,
+            orderBy: { internalDate: 'desc' },
+            take: MAX_IDS,
+            select: { id: true },
+          }),
+        ]);
+        return { total, rows };
+      });
+      if (!idResult.ok) return fail('The database could not be reached.', 503);
+      return ok({ ids: idResult.data.rows.map((row) => row.id), total: idResult.data.total });
+    }
+
     const orderBy: Prisma.MessageOrderByWithRelationInput =
       query.view === 'all' ? { processedAt: 'desc' } : { internalDate: 'desc' };
 

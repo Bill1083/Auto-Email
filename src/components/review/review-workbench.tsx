@@ -45,10 +45,34 @@ interface ListResponse {
 interface BulkResponse {
   done: string[];
   failed: { id: string; error: string }[];
+  /** Ids the server ran out of time for, to be sent again. */
+  remaining: string[];
 }
+
+interface IdsResponse {
+  ids: string[];
+  total: number;
+}
+
+/**
+ * Emails per request. Each one is a separate short request rather than one
+ * long one, because trashing is a mailbox call per email and a few hundred of
+ * them takes longer than the reverse proxy will hold a connection open.
+ */
+const CHUNK = 25;
+
+/** Only worth a bar once there is more than one chunk to get through. */
+const PROGRESS_FROM = CHUNK + 1;
 
 type Tab = 'review' | 'attention';
 type BulkAction = 'KEEP' | 'ARCHIVE' | 'TRASH' | 'DONE';
+
+const VERBS: Record<BulkAction, string> = {
+  TRASH: 'moved to Trash',
+  KEEP: 'kept in the inbox',
+  ARCHIVE: 'archived',
+  DONE: 'marked as handled',
+};
 
 export interface CategoryOption {
   key: string;
@@ -76,6 +100,10 @@ export function ReviewWorkbench({
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<MessageDto | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
+  // How many are waiting in total, which is more than the page shows once a
+  // queue grows past the page size.
+  const [totals, setTotals] = useState<{ review: number; attention: number } | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; label: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -85,11 +113,13 @@ export function ReviewWorkbench({
       ]);
       setReview(r.items);
       setAttention(a.items);
+      setTotals({ review: r.total, attention: a.total });
       setSelected(new Set());
     } catch (error) {
       toast.error(errorMessage(error));
       setReview([]);
       setAttention([]);
+      setTotals(null);
     }
   }, [selectedId]);
 
@@ -114,37 +144,100 @@ export function ReviewWorkbench({
     setSelected(allSelected ? new Set() : new Set(items.map((m) => m.id)));
   }
 
+  /**
+   * Work through the ids a chunk at a time, clearing each chunk from the list
+   * as it lands, so a long job shows real progress and a failure half way
+   * through keeps everything already done.
+   */
   async function act(ids: string[], action: BulkAction, category?: string) {
     if (ids.length === 0) return;
     setBusy(true);
+    if (ids.length >= PROGRESS_FROM) {
+      setProgress({ done: 0, total: ids.length, label: action === 'TRASH' ? 'Moving to Trash' : 'Updating' });
+    }
+
+    const single = ids.length === 1 ? overrides[ids[0]] : undefined;
+    const chosen = category ?? single;
+    let queue = [...ids];
+    let settled = 0;
+    let succeeded = 0;
+    const failures: { id: string; error: string }[] = [];
+    let stalled = false;
+
     try {
-      const single = ids.length === 1 ? overrides[ids[0]] : undefined;
-      const data = await api<BulkResponse>('/api/messages/bulk', {
-        method: 'POST',
-        json: { ids, action, ...(category ?? single ? { category: category ?? single } : {}) },
-      });
-      const doneIds = new Set(data.done);
-      setReview((prev) => (prev ? prev.filter((m) => !doneIds.has(m.id)) : prev));
-      setAttention((prev) => (prev ? prev.filter((m) => !doneIds.has(m.id)) : prev));
-      setSelected((prev) => new Set([...prev].filter((id) => !doneIds.has(id))));
-      if (data.failed.length > 0) {
-        toast.error(`${data.failed.length} could not be updated: ${data.failed[0].error}`);
-      } else {
-        const verb =
-          action === 'TRASH'
-            ? 'moved to Trash'
-            : action === 'KEEP'
-              ? 'kept in the inbox'
-              : action === 'ARCHIVE'
-                ? 'archived'
-                : 'marked as handled';
-        toast.success(`${data.done.length} email${data.done.length === 1 ? '' : 's'} ${verb}.`);
+      while (queue.length > 0) {
+        const chunk = queue.slice(0, CHUNK);
+        const data = await api<BulkResponse>('/api/messages/bulk', {
+          method: 'POST',
+          json: { ids: chunk, action, ...(chosen ? { category: chosen } : {}) },
+        });
+
+        const doneIds = new Set(data.done);
+        setReview((prev) => (prev ? prev.filter((m) => !doneIds.has(m.id)) : prev));
+        setAttention((prev) => (prev ? prev.filter((m) => !doneIds.has(m.id)) : prev));
+        setSelected((prev) => new Set([...prev].filter((id) => !doneIds.has(id))));
+
+        succeeded += data.done.length;
+        failures.push(...data.failed);
+        settled += data.done.length + data.failed.length;
+        setProgress((prev) => (prev ? { ...prev, done: settled } : prev));
+
+        // Whatever the server ran out of time for goes back to the front.
+        queue = [...(data.remaining ?? []), ...queue.slice(chunk.length)];
+        if (data.done.length === 0 && data.failed.length === 0) {
+          stalled = true;
+          break;
+        }
+        // A dead mailbox connection will not fix itself on the next chunk.
+        if (data.failed.some((failure) => failure.error.includes('reconnect'))) break;
       }
-      router.refresh();
+
+      if (failures.length > 0) {
+        toast.error(
+          `${succeeded} of ${ids.length} ${VERBS[action]}; ${failures.length} could not be updated: ${failures[0].error}`,
+        );
+      } else if (stalled) {
+        toast.warning(`${succeeded} of ${ids.length} ${VERBS[action]}. Try the rest again.`);
+      } else {
+        toast.success(`${succeeded} email${succeeded === 1 ? '' : 's'} ${VERBS[action]}.`);
+      }
     } catch (error) {
-      toast.error(errorMessage(error));
+      toast.error(
+        succeeded > 0
+          ? `${errorMessage(error)} ${succeeded} of ${ids.length} were ${VERBS[action]} before it stopped.`
+          : errorMessage(error),
+      );
     } finally {
+      setProgress(null);
       setBusy(false);
+      // Whichever queue they were taken from is that much shorter.
+      setTotals((prev) =>
+        prev
+          ? tab === 'attention'
+            ? { ...prev, attention: Math.max(0, prev.attention - succeeded) }
+            : { ...prev, review: Math.max(0, prev.review - succeeded) }
+          : prev,
+      );
+      router.refresh();
+      // A queue longer than one page has more waiting behind what was just
+      // cleared, so pull the next page in rather than leaving an empty table.
+      if (ids.length > 1) void load();
+    }
+  }
+
+  /** Confirm every proposed deletion, not just the page that is loaded. */
+  async function trashEverything() {
+    setConfirmAll(false);
+    setBusy(true);
+    try {
+      const data = await api<IdsResponse>(
+        `/api/messages?view=review&accountId=${encodeURIComponent(selectedId)}&fields=ids`,
+      );
+      setBusy(false);
+      await act(data.ids, 'TRASH');
+    } catch (error) {
+      setBusy(false);
+      toast.error(errorMessage(error));
     }
   }
 
@@ -189,11 +282,11 @@ export function ReviewWorkbench({
           <TabsList>
             <TabsTrigger value="review">
               Delete queue
-              <Count value={review?.length ?? null} />
+              <Count value={totals?.review ?? (review ? review.length : null)} />
             </TabsTrigger>
             <TabsTrigger value="attention">
               Needs attention
-              <Count value={attention?.length ?? null} />
+              <Count value={totals?.attention ?? (attention ? attention.length : null)} />
             </TabsTrigger>
           </TabsList>
           <div className="flex items-center gap-2">
@@ -204,11 +297,32 @@ export function ReviewWorkbench({
             {tab === 'review' && review && review.length > 0 ? (
               <Button variant="destructive" size="sm" onClick={() => setConfirmAll(true)} disabled={busy}>
                 <Trash2 />
-                Trash all {review.length}
+                Trash all {totals?.review ?? review.length}
               </Button>
             ) : null}
           </div>
         </div>
+
+        {progress ? (
+          <div className="mt-3 rounded-md border bg-card px-3 py-2.5" role="status" aria-live="polite">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+              <span className="font-medium">{progress.label}</span>
+              <span className="tnum text-muted-foreground">
+                {progress.done} of {progress.total}
+              </span>
+              <span className="tnum ml-auto text-xs text-muted-foreground">
+                {Math.round((progress.done / progress.total) * 100)}%
+              </span>
+            </div>
+            <div className="mt-2 h-1 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-[width] duration-500 ease-out"
+                style={{ width: `${Math.max(2, Math.round((progress.done / progress.total) * 100))}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
 
         {/* Bulk bar */}
         {selectedIds.length > 0 ? (
@@ -249,6 +363,7 @@ export function ReviewWorkbench({
         <TabsContent value="review" className="mt-3">
           <MessageList
             items={review}
+            total={totals?.review ?? null}
             names={names}
             categories={categories}
             selected={selected}
@@ -285,6 +400,7 @@ export function ReviewWorkbench({
         <TabsContent value="attention" className="mt-3">
           <MessageList
             items={attention}
+            total={totals?.attention ?? null}
             names={names}
             categories={categories}
             selected={selected}
@@ -324,10 +440,11 @@ export function ReviewWorkbench({
       <Dialog open={confirmAll} onOpenChange={setConfirmAll}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Move {review?.length ?? 0} emails to Trash?</DialogTitle>
+            <DialogTitle>Move {totals?.review ?? review?.length ?? 0} emails to Trash?</DialogTitle>
             <DialogDescription>
-              Everything currently in the delete queue goes to Gmail&apos;s Trash. Gmail keeps trashed mail for
-              30 days and each one can be undone from the Activity page until then.
+              Everything currently in the delete queue goes to Gmail&apos;s Trash, in batches of {CHUNK} with a
+              progress bar, so you can watch it work. Gmail keeps trashed mail for 30 days and each one can be
+              undone from the Activity page until then.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -337,10 +454,7 @@ export function ReviewWorkbench({
             <Button
               variant="destructive"
               disabled={busy}
-              onClick={async () => {
-                setConfirmAll(false);
-                await act((review ?? []).map((m) => m.id), 'TRASH');
-              }}
+              onClick={() => void trashEverything()}
             >
               <Trash2 />
               Trash all
@@ -393,6 +507,7 @@ function RowButton({
 
 function MessageList({
   items,
+  total,
   names,
   categories,
   selected,
@@ -407,6 +522,8 @@ function MessageList({
   empty,
 }: {
   items: MessageDto[] | null;
+  /** The whole queue, which is larger than `items` once it passes a page. */
+  total: number | null;
   names: Record<string, string>;
   categories: CategoryOption[];
   selected: Set<string>;
@@ -435,6 +552,11 @@ function MessageList({
       <div className="flex items-center gap-3 border-b px-3 py-2 text-xs text-muted-foreground">
         <Checkbox checked={allSelected} onCheckedChange={onToggleAll} aria-label="Select all" />
         <span>Select all {items.length}</span>
+        {total !== null && total > items.length ? (
+          <span>
+            · {total} waiting in all; the rest load as these are cleared
+          </span>
+        ) : null}
       </div>
       <ul className="divide-y">
         {items.map((message) => {
