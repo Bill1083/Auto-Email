@@ -1,15 +1,20 @@
 import { z } from 'zod';
 
 import { fail, guard, ok, readJson } from '@/lib/api';
-import { BULK_CHUNK_LIMIT, FeedbackError, bulkAction, type BulkOutcome } from '@/lib/pipeline/feedback';
-import { ACTIONS } from '@/lib/types';
+import {
+  BULK_ACTIONS,
+  BULK_CHUNK_LIMIT,
+  FeedbackError,
+  bulkAction,
+  type BulkOutcome,
+} from '@/lib/pipeline/feedback';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
 
 const bodySchema = z.object({
   ids: z.array(z.string().min(1).max(64)).min(1).max(BULK_CHUNK_LIMIT),
-  action: z.enum([...ACTIONS, 'DONE', 'CONFIRM', 'UNDO']),
+  action: z.enum(BULK_ACTIONS),
   category: z.string().trim().min(1).max(40).optional(),
   note: z.string().trim().max(500).optional(),
 });

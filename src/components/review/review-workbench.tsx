@@ -12,6 +12,7 @@ import {
   Paperclip,
   RefreshCw,
   ShieldOff,
+  Sparkles,
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
@@ -32,7 +33,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { api, errorMessage } from '@/lib/client';
+import { ApiError, api, errorMessage } from '@/lib/client';
+import { friendlyReason } from '@/lib/gemini-errors';
 import type { MessageDto } from '@/lib/serialize';
 import { formatRelative } from '@/lib/time';
 import { cn } from '@/lib/utils';
@@ -65,13 +67,15 @@ const CHUNK = 25;
 const PROGRESS_FROM = CHUNK + 1;
 
 type Tab = 'review' | 'attention';
-type BulkAction = 'KEEP' | 'ARCHIVE' | 'TRASH' | 'DONE';
+/** RETRY asks the AI to sort an unclassified email again. */
+type BulkAction = 'KEEP' | 'ARCHIVE' | 'TRASH' | 'DONE' | 'RETRY';
 
 const VERBS: Record<BulkAction, string> = {
   TRASH: 'moved to Trash',
   KEEP: 'kept in the inbox',
   ARCHIVE: 'archived',
   DONE: 'marked as handled',
+  RETRY: 'sorted again by the AI',
 };
 
 export interface CategoryOption {
@@ -153,7 +157,11 @@ export function ReviewWorkbench({
     if (ids.length === 0) return;
     setBusy(true);
     if (ids.length >= PROGRESS_FROM) {
-      setProgress({ done: 0, total: ids.length, label: action === 'TRASH' ? 'Moving to Trash' : 'Updating' });
+      setProgress({
+        done: 0,
+        total: ids.length,
+        label: action === 'TRASH' ? 'Moving to Trash' : action === 'RETRY' ? 'Sorting again with AI' : 'Updating',
+      });
     }
 
     const single = ids.length === 1 ? overrides[ids[0]] : undefined;
@@ -194,7 +202,7 @@ export function ReviewWorkbench({
 
       if (failures.length > 0) {
         toast.error(
-          `${succeeded} of ${ids.length} ${VERBS[action]}; ${failures.length} could not be updated: ${failures[0].error}`,
+          `${succeeded} of ${ids.length} ${VERBS[action]}; ${failures.length} could not be ${action === 'RETRY' ? 'sorted' : 'updated'}: ${failures[0].error}`,
         );
       } else if (stalled) {
         toast.warning(`${succeeded} of ${ids.length} ${VERBS[action]}. Try the rest again.`);
@@ -202,26 +210,30 @@ export function ReviewWorkbench({
         toast.success(`${succeeded} email${succeeded === 1 ? '' : 's'} ${VERBS[action]}.`);
       }
     } catch (error) {
+      // The details on a bulk failure are message ids, which mean nothing to
+      // a person; the sentence alone says what went wrong.
+      const reason = error instanceof ApiError ? error.message : errorMessage(error);
       toast.error(
-        succeeded > 0
-          ? `${errorMessage(error)} ${succeeded} of ${ids.length} were ${VERBS[action]} before it stopped.`
-          : errorMessage(error),
+        succeeded > 0 ? `${reason} ${succeeded} of ${ids.length} were ${VERBS[action]} before it stopped.` : reason,
       );
     } finally {
       setProgress(null);
       setBusy(false);
-      // Whichever queue they were taken from is that much shorter.
-      setTotals((prev) =>
-        prev
-          ? tab === 'attention'
-            ? { ...prev, attention: Math.max(0, prev.attention - succeeded) }
-            : { ...prev, review: Math.max(0, prev.review - succeeded) }
-          : prev,
-      );
+      // Whichever queue they were taken from is that much shorter. A re-sort
+      // can land anywhere, including back in this queue, so it reloads instead.
+      if (action !== 'RETRY') {
+        setTotals((prev) =>
+          prev
+            ? tab === 'attention'
+              ? { ...prev, attention: Math.max(0, prev.attention - succeeded) }
+              : { ...prev, review: Math.max(0, prev.review - succeeded) }
+            : prev,
+        );
+      }
       router.refresh();
       // A queue longer than one page has more waiting behind what was just
       // cleared, so pull the next page in rather than leaving an empty table.
-      if (ids.length > 1) void load();
+      if (ids.length > 1 || action === 'RETRY') void load();
     }
   }
 
@@ -264,6 +276,8 @@ export function ReviewWorkbench({
   }
 
   const selectedIds = [...selected].filter((id) => items?.some((m) => m.id === id));
+  // Emails the AI failed on earlier (usually because Gemini was busy).
+  const unclassified = (attention ?? []).filter((m) => m.decidedBy === 'fallback');
 
   return (
     <div className="space-y-4">
@@ -294,6 +308,18 @@ export function ReviewWorkbench({
               <RefreshCw className={cn(busy && 'animate-spin')} />
               Refresh
             </Button>
+            {tab === 'attention' && unclassified.length > 0 ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void act(unclassified.map((m) => m.id), 'RETRY')}
+                disabled={busy}
+                title="Ask the AI to sort the emails it could not classify before"
+              >
+                <Sparkles />
+                Sort {unclassified.length} unclassified again
+              </Button>
+            ) : null}
             {tab === 'review' && review && review.length > 0 ? (
               <Button variant="destructive" size="sm" onClick={() => setConfirmAll(true)} disabled={busy}>
                 <Trash2 />
@@ -420,6 +446,15 @@ export function ReviewWorkbench({
             }
             renderActions={(message) => (
               <>
+                {message.decidedBy === 'fallback' ? (
+                  <RowButton
+                    icon={Sparkles}
+                    label="Sort again"
+                    title="Ask the AI to classify this email again"
+                    disabled={busy}
+                    onClick={() => act([message.id], 'RETRY')}
+                  />
+                ) : null}
                 <RowButton icon={CheckCheck} label="Done" disabled={busy} onClick={() => act([message.id], 'DONE')} />
                 <RowButton icon={Archive} label="Archive" disabled={busy} onClick={() => act([message.id], 'ARCHIVE')} />
                 <RowButton
@@ -618,7 +653,7 @@ function MessageList({
                   <span className="tnum text-xs text-muted-foreground">{formatRelative(message.internalDate)}</span>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  <span className="font-medium text-foreground/80">Why:</span> {message.reason}
+                  <span className="font-medium text-foreground/80">Why:</span> {friendlyReason(message.reason)}
                   {message.guardNote ? <span className="block">{message.guardNote}</span> : null}
                 </p>
               </div>

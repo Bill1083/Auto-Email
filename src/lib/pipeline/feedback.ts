@@ -19,6 +19,7 @@ import {
   revertChanges,
   type Plan,
 } from '@/lib/pipeline/apply';
+import { reclassifyMessages } from '@/lib/pipeline/reclassify';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { getSettings } from '@/lib/settings';
 import {
@@ -188,8 +189,9 @@ export async function confirmDecision(messageId: string): Promise<Message> {
 // Bulk
 // ---------------------------------------------------------------------------
 
-/** Everything the bulk route can ask for. */
-export type BulkActionName = Action | 'DONE' | 'CONFIRM' | 'UNDO';
+/** Everything the bulk route can ask for. RETRY sorts unclassified emails again. */
+export const BULK_ACTIONS = [...ACTIONS, 'DONE', 'CONFIRM', 'UNDO', 'RETRY'] as const;
+export type BulkActionName = (typeof BULK_ACTIONS)[number];
 
 export interface BulkInput {
   action: BulkActionName;
@@ -242,6 +244,8 @@ export async function bulkAction(
   const unique = [...new Set(ids)];
   const deadline = Date.now() + budgetMs;
   const outcome: BulkOutcome = { done: [], failed: [], remaining: [] };
+
+  if (input.action === 'RETRY') return reclassifyMessages(unique, deadline);
 
   // Undo reverses a different change set per message, and Attention is never
   // more than a handful at a time, so both keep the one-at-a-time path.

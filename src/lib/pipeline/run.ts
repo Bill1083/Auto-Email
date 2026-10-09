@@ -8,6 +8,10 @@
  * the already-persisted chunks in place and records the error on the run;
  * emails that were fetched but not persisted are simply picked up next time,
  * because the lanes only ever look at ids the database has not seen.
+ *
+ * That is also how a busy Gemini is handled: emails it could not sort even
+ * after retrying are deliberately not persisted, so nothing happens to them
+ * in Gmail, and a follow-up run is booked to try them again.
  */
 
 import type { Account, Category, Rule } from '@prisma/client';
@@ -20,6 +24,7 @@ import {
   recordAccountError,
 } from '@/lib/accounts';
 import { OTHER_CATEGORY, listCategories } from '@/lib/categories';
+import { env } from '@/lib/env';
 import { epochSeconds, ReauthRequiredError, type MailProvider } from '@/lib/mail/provider';
 import { executePlans, planChanges } from '@/lib/pipeline/apply';
 import { computeBudget, effectiveDailyLimit, processedToday } from '@/lib/pipeline/budget';
@@ -30,6 +35,7 @@ import {
   regenerateLearnedNotes,
   relevantExamples,
 } from '@/lib/pipeline/learning';
+import { clearRetry, scheduleRetry } from '@/lib/pipeline/retry-queue';
 import { freeformInstructions, matchRule } from '@/lib/pipeline/rules';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { getSettings, type AppSettings } from '@/lib/settings';
@@ -55,6 +61,8 @@ export interface RunOutcome {
   status: 'OK' | 'PARTIAL' | 'FAILED' | 'SKIPPED';
   processed: number;
   message: string;
+  /** Emails left untouched because Gemini was busy; a retry is booked. */
+  deferred?: number;
 }
 
 const locks = new Map<string, Promise<RunOutcome>>();
@@ -177,6 +185,8 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
   };
 
   if (budget <= 0) {
+    // Anything left for later waits for tomorrow's allowance like everything else.
+    clearRetry(account.id);
     await finish('OK', {}, null);
     return {
       runId: run.id,
@@ -191,6 +201,7 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     provider = providerFor(account);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Provider unavailable.';
+    clearRetry(account.id);
     await finish('FAILED', {}, message);
     return { runId: run.id, status: 'FAILED', processed: 0, message };
   }
@@ -208,6 +219,9 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
   };
   let persisted = 0;
   let partialError: string | null = null;
+  // Emails Gemini was too busy to sort. Never persisted, so they come round again.
+  const deferred: { email: RawEmail; lane: Lane }[] = [];
+  let busyReason: string | null = null;
 
   try {
     // Labels are only created on the mailbox when changes will actually be
@@ -288,16 +302,7 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
           email,
           lane: emailLane,
           rule: match.rule,
-          decision: {
-            category: match.category,
-            action: match.action,
-            confidence: 100,
-            reason: describeRule(match.rule),
-            needsReply: false,
-            decidedBy: 'rule',
-            ruleId: match.rule.id,
-            guardNote: null,
-          },
+          decision: decisionFromRule(match.rule, match.action, match.category),
         });
         counts.ruleDecided += 1;
       } else {
@@ -322,6 +327,14 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
 
       for (const batch of chunk(needsAi, settings.aiBatchSize)) {
         const batchEmails = batch.map((b) => b.email);
+        // Once Gemini has stayed busy through a full round of retries, every
+        // later batch would only repeat the wait. Leave the rest for later.
+        if (busyReason) {
+          deferred.push(...batch);
+          sorted += batch.length;
+          await progress('sorting', sorted, needsAi.length);
+          continue;
+        }
         const examples = await relevantExamples(account.id, batchEmails);
         const result = await classifyBatch(batchEmails, examples, ctx, systemInstruction);
         const costUsd = computeCostUsd(result.usage, {
@@ -350,6 +363,13 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
             },
           }),
         );
+        if (result.transient) {
+          busyReason = result.errorReason ?? 'Gemini was too busy.';
+          deferred.push(...batch);
+          sorted += batch.length;
+          await progress('sorting', sorted, needsAi.length);
+          continue;
+        }
         if (!result.ok && result.errorReason) {
           partialError = `${result.errorCode}: ${result.errorReason}`;
         }
@@ -359,15 +379,7 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
             result.decisions.get(item.email.id) ?? fallbackDecision('No decision returned.');
           let decision = aiDecision;
           if (item.rule && item.rule.action) {
-            decision = {
-              ...aiDecision,
-              action: item.rule.action as Decision['action'],
-              category: aiDecision.decidedBy === 'fallback' ? OTHER_CATEGORY : aiDecision.category,
-              confidence: 100,
-              reason: `${describeRule(item.rule)} ${aiDecision.decidedBy === 'ai' ? `Category by AI: ${aiDecision.reason}` : ''}`.trim(),
-              decidedBy: 'rule',
-              ruleId: item.rule.id,
-            };
+            decision = withRuleAction(aiDecision, item.rule);
             counts.ruleDecided += 1;
           } else {
             counts.aiDecided += 1;
@@ -482,6 +494,23 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       );
     }
 
+    // --- Left for later ----------------------------------------------------
+    // Backlog items stay PENDING on their own. New mail needs the sync point
+    // held back, or the next run would list from after these emails.
+    if (deferred.some((item) => item.lane === 'new')) newLaneExhausted = false;
+    if (deferred.length > 0) {
+      const retryAt = scheduleRetry(account.id);
+      const minutes = Math.max(1, Math.round((retryAt.getTime() - Date.now()) / 60_000));
+      const when = env.schedulerEnabled ? `in about ${minutes} minutes` : 'on the next run';
+      const left = `${deferred.length} email${deferred.length === 1 ? ' was' : 's were'} left untouched and will be retried automatically ${when}.`;
+      // What happened to the emails first; Google's explanation after.
+      const busy = `${left} ${busyReason ?? 'Gemini was too busy.'}`;
+      partialError = partialError ? `${busy} Also: ${partialError}` : busy;
+      console.warn(`[automail] ${account.email}: ${busy}`);
+    } else {
+      clearRetry(account.id);
+    }
+
     // --- Cursors -----------------------------------------------------------
     const pendingBacklog = await withDatabase(() =>
       prisma.backlogItem.count({ where: { accountId: account.id, status: 'PENDING' } }),
@@ -520,18 +549,22 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       console.warn('[automail] learning housekeeping failed:', error instanceof Error ? error.message : error);
     }
 
+    const processedText =
+      persisted === 0 && deferred.length === 0
+        ? 'Nothing new to process.'
+        : `${persisted} email${persisted === 1 ? '' : 's'} processed${settings.dryRun ? ' (dry run)' : ''}.`;
     return {
       runId: run.id,
       status: partialError ? 'PARTIAL' : 'OK',
       processed: persisted,
-      message:
-        persisted === 0
-          ? 'Nothing new to process.'
-          : `${persisted} email${persisted === 1 ? '' : 's'} processed${settings.dryRun ? ' (dry run)' : ''}.`,
+      deferred: deferred.length,
+      message: deferred.length > 0 ? `${processedText} ${deferred.length} left for a retry.` : processedText,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     console.error(`[automail] run ${run.id} failed:`, message);
+    // A failed run is not a busy Gemini; the normal schedule takes it from here.
+    clearRetry(account.id);
     if (error instanceof ReauthRequiredError) {
       await markNeedsReauth(account.id, message);
     } else {
@@ -540,6 +573,33 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     await finish('FAILED', counts, message);
     return { runId: run.id, status: 'FAILED', processed: persisted, message };
   }
+}
+
+/** A rule that names a category decides the email outright. */
+export function decisionFromRule(rule: Rule, action: Decision['action'], category: string): Decision {
+  return {
+    category,
+    action,
+    confidence: 100,
+    reason: describeRule(rule),
+    needsReply: false,
+    decidedBy: 'rule',
+    ruleId: rule.id,
+    guardNote: null,
+  };
+}
+
+/** A rule without a category: the model picks the label, the rule's action wins. */
+export function withRuleAction(aiDecision: Decision, rule: Rule): Decision {
+  return {
+    ...aiDecision,
+    action: rule.action as Decision['action'],
+    category: aiDecision.decidedBy === 'fallback' ? OTHER_CATEGORY : aiDecision.category,
+    confidence: 100,
+    reason: `${describeRule(rule)} ${aiDecision.decidedBy === 'ai' ? `Category by AI: ${aiDecision.reason}` : ''}`.trim(),
+    decidedBy: 'rule',
+    ruleId: rule.id,
+  };
 }
 
 function describeRule(rule: Rule): string {

@@ -1,6 +1,7 @@
 import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { fail, guard, ok } from '@/lib/api';
 import { effectiveDailyLimit } from '@/lib/pipeline/budget';
+import { soonestRetry, type LiveRetry } from '@/lib/pipeline/retry-queue';
 import { isRunning } from '@/lib/pipeline/run';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { getSettingsForAccounts } from '@/lib/settings';
@@ -34,6 +35,8 @@ export interface LiveResponse {
     fetched: number;
     dryRun: boolean;
   } | null;
+  /** A follow-up booked because Gemini was too busy to finish a run. */
+  retry: LiveRetry | null;
 }
 
 /**
@@ -118,6 +121,7 @@ export async function GET(request: Request) {
             dryRun: data.data.lastFinished.dryRun,
           }
         : null,
+      retry: soonestRetry(inScope),
     };
     return ok(response);
   }, 'GET /api/live');

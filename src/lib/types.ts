@@ -24,7 +24,8 @@ export const RULE_KINDS = ['SENDER', 'DOMAIN', 'SUBJECT_CONTAINS', 'FREEFORM'] a
 export type RuleKind = (typeof RULE_KINDS)[number];
 
 export type Lane = 'new' | 'backlog';
-export type RunTrigger = 'schedule' | 'manual' | 'cron';
+/** `retry` is the follow-up booked when Gemini was too busy to finish a run. */
+export type RunTrigger = 'schedule' | 'manual' | 'cron' | 'retry';
 
 /** System labels applied alongside category labels. Keys into the label map. */
 export const SYSTEM_LABELS = {

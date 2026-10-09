@@ -4,11 +4,14 @@
  * A one-minute tick checks every active account: if a configured run time
  * has passed since the account's last scheduled run, a full run starts; if
  * new-mail polling is on and enough minutes have elapsed, only the new-mail
- * lane runs. Started once per server process from `instrumentation.ts`.
+ * lane runs. A run that had to leave emails for later because Gemini was busy
+ * books a follow-up, which is picked up here too. Started once per server
+ * process from `instrumentation.ts`.
  * Set SCHEDULER_ENABLED=false when host cron drives /api/jobs/run instead.
  */
 
 import { env } from '@/lib/env';
+import { dueRetries } from '@/lib/pipeline/retry-queue';
 import { runAccount } from '@/lib/pipeline/run';
 import { prisma, withDatabase } from '@/lib/prisma';
 import { defaultSettings, getSettingsForAccounts } from '@/lib/settings';
@@ -57,6 +60,7 @@ export async function tick(state: SchedulerState, now = new Date()): Promise<voi
     if (!accounts.ok) return;
     // Run times and polling are per mailbox, like every other setting.
     const perAccount = await getSettingsForAccounts(accounts.data.map((a) => a.id));
+    const retries = new Set(dueRetries(now.getTime()));
 
     for (const account of accounts.data) {
       const settings = perAccount.get(account.id) ?? defaultSettings();
@@ -72,6 +76,14 @@ export async function tick(state: SchedulerState, now = new Date()): Promise<voi
         );
         const outcome = await runAccount({ accountId: account.id, trigger: 'schedule', lane: 'both' });
         console.log(`[automail] scheduled run for ${account.email}: ${outcome.status} — ${outcome.message}`);
+        continue;
+      }
+
+      // Emails left for later because Gemini was busy. The run books the next
+      // attempt itself if it is still busy, or clears the booking if not.
+      if (retries.has(account.id)) {
+        const outcome = await runAccount({ accountId: account.id, trigger: 'retry', lane: 'both' });
+        console.log(`[automail] retry run for ${account.email}: ${outcome.status} — ${outcome.message}`);
         continue;
       }
 

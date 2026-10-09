@@ -15,6 +15,12 @@ import { GoogleGenAI, Type, type Schema } from '@google/genai';
 import type { ZodType, ZodTypeDef } from 'zod';
 
 import { env } from '@/lib/env';
+import {
+  classifyGeminiError,
+  describeGeminiError,
+  geminiRetryDelayMs,
+  parseGeminiError,
+} from '@/lib/gemini-errors';
 import { ZERO_USAGE, type TokenUsage } from '@/lib/types';
 
 export { Type };
@@ -26,7 +32,20 @@ export type GeminiFailureCode =
   | 'EMPTY_RESPONSE'
   | 'INVALID_JSON'
   | 'SCHEMA_MISMATCH'
+  /** The model is busy (503 and friends); worth trying again later. */
+  | 'OVERLOADED'
+  /** This key is being rate limited (429); worth trying again later. */
+  | 'RATE_LIMITED'
   | 'API_ERROR';
+
+/**
+ * Failures that mean "not now" rather than "not this": the emails involved
+ * are left alone and tried again on a later run instead of being filed as
+ * unclassified.
+ */
+export function isTransientFailure(code: GeminiFailureCode | null | undefined): boolean {
+  return code === 'OVERLOADED' || code === 'RATE_LIMITED' || code === 'TIMEOUT';
+}
 
 export type GeminiOutcome<T> =
   | { ok: true; data: T; model: string; usage: TokenUsage; latencyMs: number }
@@ -40,6 +59,11 @@ export type GeminiOutcome<T> =
     };
 
 export interface StructuredRequest<T> {
+  /**
+   * Retry an overloaded or rate-limited model with backoff before giving up.
+   * On by default; worth turning off only where a caller retries itself.
+   */
+  retry?: boolean;
   systemInstruction: string;
   prompt: string;
   schema: Schema;
@@ -131,40 +155,68 @@ export async function generateStructured<T>(
   }
 
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const retry = request.retry ?? true;
 
   let text: string | undefined;
   let usage: TokenUsage = { ...ZERO_USAGE };
-  try {
-    const response = await getClient(apiKey).models.generateContent({
-      model,
-      contents: [{ role: 'user', parts: [{ text: request.prompt }] }],
-      config: {
-        systemInstruction: request.systemInstruction,
-        temperature: request.temperature ?? 0.2,
-        maxOutputTokens: request.maxOutputTokens ?? 8_192,
-        responseMimeType: 'application/json',
-        responseSchema: request.schema,
-        thinkingConfig: { thinkingBudget: request.thinkingBudget ?? 0 },
-        abortSignal: AbortSignal.timeout(timeoutMs),
-      },
-    });
-    text = response.text;
-    usage = usageFromMetadata(response.usageMetadata);
-  } catch (error) {
-    const latencyMs = Date.now() - started;
-    const name = error instanceof Error ? error.name : '';
-    if (name === 'TimeoutError' || name === 'AbortError') {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const response = await getClient(apiKey).models.generateContent({
+        model,
+        contents: [{ role: 'user', parts: [{ text: request.prompt }] }],
+        config: {
+          systemInstruction: request.systemInstruction,
+          temperature: request.temperature ?? 0.2,
+          maxOutputTokens: request.maxOutputTokens ?? 8_192,
+          responseMimeType: 'application/json',
+          responseSchema: request.schema,
+          thinkingConfig: { thinkingBudget: request.thinkingBudget ?? 0 },
+          abortSignal: AbortSignal.timeout(timeoutMs),
+        },
+      });
+      text = response.text;
+      usage = usageFromMetadata(response.usageMetadata);
+      break;
+    } catch (error) {
+      const latencyMs = Date.now() - started;
+      const name = error instanceof Error ? error.name : '';
+      // A request that hung for a full minute is not retried here: doing so
+      // would hold the run open for minutes. It is retried on a later run.
+      if (name === 'TimeoutError' || name === 'AbortError') {
+        return {
+          ok: false,
+          code: 'TIMEOUT',
+          reason: `Gemini did not respond within ${Math.round(timeoutMs / 1000)}s.`,
+          ...base,
+          latencyMs,
+        };
+      }
+
+      const raw = sanitiseError(error instanceof Error ? error.message : 'Unknown error');
+      const httpStatus =
+        typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : null;
+      const parsed = parseGeminiError(raw, httpStatus);
+      const kind = classifyGeminiError(parsed);
+      const wait = retry && kind !== 'API_ERROR' ? geminiRetryDelayMs(attempt, parsed.retryAfterSeconds) : null;
+
+      if (wait !== null) {
+        console.warn(
+          `[automail] gemini ${parsed.httpStatus ?? kind} on attempt ${attempt}; retrying in ${Math.round(wait / 1000)}s`,
+        );
+        await sleep(wait);
+        continue;
+      }
+
+      const tries = attempt > 1 ? ` Tried ${attempt} times.` : '';
+      console.error(`[automail] gemini request failed after ${attempt} attempt(s):`, raw);
       return {
         ok: false,
-        code: 'TIMEOUT',
-        reason: `Gemini did not respond within ${Math.round(timeoutMs / 1000)}s.`,
+        code: kind,
+        reason: `${describeGeminiError(parsed, kind)}${tries}`,
         ...base,
         latencyMs,
       };
     }
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error('[automail] gemini request failed:', message);
-    return { ok: false, code: 'API_ERROR', reason: sanitiseError(message), ...base, latencyMs };
   }
 
   const latencyMs = Date.now() - started;
@@ -211,6 +263,10 @@ export async function generateStructured<T>(
   return { ok: true, data: validated.data, model, usage, latencyMs };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Keep API keys and URLs out of anything shown to the user; upstream error
  * strings sometimes embed the request URL.
@@ -219,7 +275,7 @@ function sanitiseError(message: string): string {
   const withoutKeys = message
     .replace(/key=[^&\s"']+/gi, 'key=***')
     .replace(/AIza[0-9A-Za-z_-]{10,}/g, '***');
-  return withoutKeys.length > 300 ? `${withoutKeys.slice(0, 300)}...` : withoutKeys;
+  return withoutKeys.length > 2_000 ? `${withoutKeys.slice(0, 2_000)}...` : withoutKeys;
 }
 
 /** Human-readable explanation used when a batch could not be classified. */
@@ -234,6 +290,10 @@ export function describeFailure(code: GeminiFailureCode): string {
     case 'INVALID_JSON':
     case 'SCHEMA_MISMATCH':
       return 'Gemini returned data that did not match the required schema.';
+    case 'OVERLOADED':
+      return 'Gemini was too busy.';
+    case 'RATE_LIMITED':
+      return 'Gemini rate limit reached.';
     case 'API_ERROR':
     default:
       return 'The Gemini request failed.';

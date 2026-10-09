@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { api, errorMessage } from '@/lib/client';
+import { friendlyReason } from '@/lib/gemini-errors';
 import type { MessageDto } from '@/lib/serialize';
 
 /**
@@ -68,7 +69,7 @@ export function MessagePreview({
             </div>
             <p className="rounded-md bg-muted/50 px-3 py-2 text-sm">
               <span className="font-medium">Why: </span>
-              {message.reason}
+              {friendlyReason(message.reason)}
               {message.guardNote ? (
                 <span className="mt-1 block text-xs text-muted-foreground">{message.guardNote}</span>
               ) : null}

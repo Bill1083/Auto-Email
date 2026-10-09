@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { ListChecks, Loader2, Mail, TriangleAlert } from 'lucide-react';
+import { Clock, ListChecks, Loader2, Mail, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { StatCard, type StatCardProps } from '@/components/stat-card';
@@ -181,6 +181,41 @@ export function RunProgress({ showMailbox = false }: { showMailbox?: boolean }) 
         ) : (
           <div className="h-full w-1/3 rounded-full bg-primary animate-sweep" />
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shown while emails are waiting because Gemini was too busy to sort them.
+ * Nothing happened to those emails in Gmail; a follow-up run is booked and
+ * this says when, so a quiet dashboard is not mistaken for a stuck one.
+ */
+export function RetryNotice({ showMailbox = false }: { showMailbox?: boolean }) {
+  const context = useLive();
+  const retry = context?.live.retry ?? null;
+  if (!retry || context?.live.run) return null;
+
+  const at = new Date(retry.at);
+  const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const last = context?.live.lastFinished;
+  const detail = last?.status === 'PARTIAL' && last.error ? last.error : null;
+
+  return (
+    <div
+      className="flex items-start gap-2.5 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5 text-sm"
+      role="status"
+    >
+      <Clock className="mt-0.5 size-4 shrink-0 text-warning" />
+      <div className="min-w-0">
+        <p className="font-medium">
+          Waiting for Gemini · retrying automatically at {time}
+          {showMailbox ? <span className="font-normal text-muted-foreground"> · {retry.accountEmail}</span> : null}
+        </p>
+        <p className="mt-0.5 line-clamp-3 break-words text-xs text-muted-foreground">
+          {detail ??
+            'Gemini was too busy to sort some emails. They were left untouched in Gmail and will be sorted on the retry.'}
+        </p>
       </div>
     </div>
   );

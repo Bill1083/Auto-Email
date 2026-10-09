@@ -17,6 +17,7 @@ import {
   Type,
   describeFailure,
   generateStructured,
+  isTransientFailure,
   type GeminiFailureCode,
   type Schema,
 } from '@/lib/gemini';
@@ -253,6 +254,12 @@ export function fallbackDecision(reason: string): Decision {
 export interface ClassifyBatchResult {
   decisions: Map<string, Decision>;
   ok: boolean;
+  /**
+   * The model was busy or rate limited even after retrying. The decisions
+   * are placeholders and the caller should leave these emails for later
+   * rather than file them.
+   */
+  transient: boolean;
   errorCode: GeminiFailureCode | null;
   errorReason: string | null;
   model: string;
@@ -281,11 +288,16 @@ export async function classifyBatch(
   const decisions = new Map<string, Decision>();
 
   if (!outcome.ok) {
-    const reason = `${describeFailure(outcome.code)} ${outcome.reason}`.trim();
+    // The newer failure codes carry a complete sentence of their own.
+    const reason =
+      outcome.code === 'API_ERROR' || outcome.code === 'OVERLOADED' || outcome.code === 'RATE_LIMITED'
+        ? outcome.reason
+        : `${describeFailure(outcome.code)} ${outcome.reason}`.trim();
     for (const email of emails) decisions.set(email.id, fallbackDecision(`Not classified: ${reason}`));
     return {
       decisions,
       ok: false,
+      transient: isTransientFailure(outcome.code),
       errorCode: outcome.code,
       errorReason: outcome.reason,
       model: outcome.model,
@@ -308,6 +320,7 @@ export async function classifyBatch(
   return {
     decisions,
     ok: true,
+    transient: false,
     errorCode: null,
     errorReason: null,
     model: outcome.model,

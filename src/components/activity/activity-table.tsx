@@ -22,6 +22,7 @@ import type { CategoryOption } from '@/components/review/review-workbench';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { api, errorMessage } from '@/lib/client';
+import { friendlyReason } from '@/lib/gemini-errors';
 import type { MessageDto } from '@/lib/serialize';
 import { formatRelative } from '@/lib/time';
 import { ACTIONS } from '@/lib/types';
@@ -240,7 +241,7 @@ export function ActivityTable({
                       <Eye className="mt-0.5 size-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100" />
                     </button>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground/80">Why:</span> {message.reason}
+                      <span className="font-medium text-foreground/80">Why:</span> {friendlyReason(message.reason)}
                       {message.guardNote ? <span className="block">{message.guardNote}</span> : null}
                       {message.feedbackNote ? (
                         <span className="block">

@@ -13,8 +13,9 @@ import {
 
 import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { listCategories } from '@/lib/categories';
+import { soonestRetry } from '@/lib/pipeline/retry-queue';
 import { ActivityChart } from '@/components/overview/activity-chart';
-import { LiveProvider, LiveStatCard, RunProgress } from '@/components/overview/live-status';
+import { LiveProvider, LiveStatCard, RetryNotice, RunProgress } from '@/components/overview/live-status';
 import { SetupChecklist } from '@/components/overview/setup-checklist';
 import type { LiveResponse } from '@/app/api/live/route';
 import { ActionBadge, CategoryBadge, ConfidenceMeter, DecidedByBadge } from '@/components/shared/badges';
@@ -90,6 +91,7 @@ export default async function OverviewPage() {
             dryRun: stats.lastRun.dryRun,
           }
         : null,
+    retry: soonestRetry(selected ? [selected] : accounts),
   };
 
   const backlogHint =
@@ -139,6 +141,8 @@ export default async function OverviewPage() {
 
         {/* Only present while a run is working. */}
         <RunProgress showMailbox={!selected} />
+        {/* Only present while emails are waiting for a busy Gemini. */}
+        <RetryNotice showMailbox={!selected} />
 
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <LiveStatCard
