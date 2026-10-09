@@ -255,7 +255,7 @@ export function SettingsForm({
         </CardContent>
       </Card>
 
-      <div className="sticky bottom-20 z-10 flex items-center justify-end gap-3 rounded-lg border bg-background/95 px-3 py-2 backdrop-blur md:bottom-4">
+      <div className="sticky bottom-20 z-10 flex items-center justify-end gap-3 rounded-lg border bg-background/95 px-3 py-2 backdrop-blur lg:bottom-4">
         <span className="text-xs text-muted-foreground">
           {changed.length === 0
             ? `No unsaved changes for ${email}.`

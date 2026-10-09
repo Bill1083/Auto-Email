@@ -116,6 +116,11 @@ model Message {
   feedbackNote String?
   feedbackAt   DateTime?
 
+  /// Set while a background job holds this message for a bulk action. The
+  /// review and attention queues leave such messages out, so a bulk action
+  /// clears them from view the moment it is queued.
+  queuedJobId String?
+
   runId       String?
   lane        String   @default("new") // new | backlog
   processedAt DateTime @default(now())
@@ -130,6 +135,34 @@ model Message {
   @@index([processedAt])
   @@index([fromAddress])
   @@map("messages")
+}
+
+/// A bulk action handed to the background worker, so it runs to completion
+/// even after the browser that asked for it has closed.
+model Job {
+  id          String    @id @default(cuid())
+  /// The mailbox it was started from; null on the all-mailboxes view.
+  accountId   String?
+  /// TRASH | KEEP | ARCHIVE | DONE | RETRY
+  action      String
+  category    String?
+  note        String?
+  /// QUEUED | RUNNING | DONE | CANCELLED
+  status      String    @default("QUEUED")
+  total       Int       @default(0)
+  done        Int       @default(0)
+  failed      Int       @default(0)
+  /// JSON array of the message ids still to do; shrinks as the job works,
+  /// which is what lets it resume after a restart.
+  pendingJson String    @default("[]")
+  /// The first failure, for the summary.
+  error       String?
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  finishedAt  DateTime?
+
+  @@index([status, createdAt])
+  @@map("jobs")
 }
 
 /// One execution of the pipeline for one account.

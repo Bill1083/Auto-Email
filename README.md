@@ -220,7 +220,8 @@ Every route except the ones marked public needs the session cookie.
 | GET         | `/api/messages/:id/body`             | Body excerpt fetched live from the mailbox          |
 | POST        | `/api/messages/:id/feedback`         | Keep / archive / trash / attention / done / confirm |
 | POST        | `/api/messages/:id/undo`             | Reverse every change made to the message            |
-| POST        | `/api/messages/bulk`                 | The same, for many ids                              |
+| GET/POST    | `/api/bulk`                          | Queue a bulk action to run in the background / list jobs |
+| POST        | `/api/bulk/:id/cancel`               | Stop a background job; unreached emails return to the queue |
 | GET/POST    | `/api/rules`, PATCH/DELETE `/api/rules/:id` | Rules and instructions                        |
 | GET/POST    | `/api/rules/suggestions`             | Learned suggestions; accept or dismiss              |
 | POST        | `/api/rules/learn`                   | Regenerate one mailbox's learned preferences        |

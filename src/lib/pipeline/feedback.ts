@@ -31,6 +31,7 @@ import {
   type Action,
   type LabelMap,
 } from '@/lib/types';
+import { forEachConcurrent } from '@/lib/utils';
 
 /** Request body for the feedback routes. */
 export const feedbackBodySchema = z.object({
@@ -208,6 +209,9 @@ export interface BulkOutcome {
    */
   remaining: string[];
 }
+
+/** Gmail trash calls in flight at once during a bulk action. */
+const TRASH_CONCURRENCY = 6;
 
 /** How long one request will spend on the mailbox before handing the rest back. */
 export const BULK_BUDGET_MS = 45_000;
@@ -443,18 +447,19 @@ async function applyToAccount(
   }
   const labelled = await modifyInGroups(provider, forward, outcome);
 
-  // Gmail has no batch trash, so this is the one genuinely per-message call —
-  // and the reason a few hundred emails need a deadline at all.
-  const applied: Message[] = [];
-  for (const [index, message] of labelled.entries()) {
-    if (!plans.get(message.id)?.changes.trashed) {
-      applied.push(message);
-      continue;
-    }
-    if (index > 0 && Date.now() > deadline) {
+  // Gmail has no batch trash, so this is the one genuinely per-message call.
+  // A few run at once: each spends most of its time waiting on the network,
+  // and the Gmail client still spaces out request starts to stay inside the
+  // per-user quota.
+  const applied: Message[] = labelled.filter((message) => !plans.get(message.id)?.changes.trashed);
+  const toTrash = labelled.filter((message) => plans.get(message.id)?.changes.trashed);
+  let started = 0;
+  await forEachConcurrent(toTrash, TRASH_CONCURRENCY, async (message) => {
+    if (started > 0 && Date.now() > deadline) {
       outcome.remaining.push(message.id);
-      continue;
+      return;
     }
+    started += 1;
     try {
       await provider.trash(message.gmailId);
       applied.push(message);
@@ -462,7 +467,7 @@ async function applyToAccount(
       if (error instanceof ReauthRequiredError) throw error;
       outcome.failed.push({ id: message.id, error: describe(error) });
     }
-  }
+  });
 
   await saveAll(applied, outcome, (message) => {
     const plan = plans.get(message.id)!;

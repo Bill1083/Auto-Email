@@ -4,6 +4,7 @@
 
 import type { Account, Run } from '@prisma/client';
 
+import { ATTENTION_QUEUE, REVIEW_QUEUE } from '@/lib/messages-query';
 import { daysToClear, effectiveDailyLimit } from '@/lib/pipeline/budget';
 import { projectedCost } from '@/lib/pipeline/cost';
 import { prisma, withDatabase } from '@/lib/prisma';
@@ -136,23 +137,8 @@ export async function overviewStats(
     const [processedToday, awaitingReview, needsAttention, totalProcessed, totalTrashed, recent, lastRun, backlogPending] =
       await Promise.all([
         prisma.message.count({ where: { ...scope(accountId), processedAt: { gte: todayStart } } }),
-        prisma.message.count({
-          where: {
-            ...scope(accountId),
-            action: 'TRASH',
-            status: { in: ['PENDING_REVIEW', 'DRY_RUN'] },
-            userAction: null,
-          },
-        }),
-        prisma.message.count({
-          where: {
-            ...scope(accountId),
-            action: 'ATTENTION',
-            attentionDoneAt: null,
-            userAction: null,
-            status: { not: 'REVERTED' },
-          },
-        }),
+        prisma.message.count({ where: { ...scope(accountId), ...REVIEW_QUEUE } }),
+        prisma.message.count({ where: { ...scope(accountId), ...ATTENTION_QUEUE } }),
         prisma.message.count({ where: scope(accountId) }),
         prisma.message.count({ where: { ...scope(accountId), status: 'TRASHED' } }),
         prisma.message.findMany({

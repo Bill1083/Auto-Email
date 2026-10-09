@@ -98,6 +98,32 @@ export function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+/**
+ * Run `fn` over every item with at most `limit` calls in flight. The first
+ * error stops new calls from starting, lets the ones in flight finish, and is
+ * then thrown, so a fatal failure never leaves stray work running behind it.
+ */
+export async function forEachConcurrent<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | null = null;
+  const worker = async () => {
+    while (!failure && next < items.length) {
+      const index = next++;
+      try {
+        await fn(items[index], index);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  if (failure) throw (failure as { error: unknown }).error;
+}
+
 export function uniq<T>(items: T[]): T[] {
   return Array.from(new Set(items));
 }

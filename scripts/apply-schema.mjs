@@ -164,6 +164,41 @@ async function addRunProgress(prisma) {
   return true;
 }
 
+/**
+ * Bulk actions run as background jobs. The DDL is exactly what
+ * `prisma migrate diff` emits for the model, so an upgraded database ends up
+ * identical to a fresh one.
+ */
+async function addJobs(prisma) {
+  let changed = false;
+  if (!(await tableExists(prisma, 'jobs'))) {
+    await prisma.$executeRawUnsafe(`CREATE TABLE "jobs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "accountId" TEXT,
+    "action" TEXT NOT NULL,
+    "category" TEXT,
+    "note" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'QUEUED',
+    "total" INTEGER NOT NULL DEFAULT 0,
+    "done" INTEGER NOT NULL DEFAULT 0,
+    "failed" INTEGER NOT NULL DEFAULT 0,
+    "pendingJson" TEXT NOT NULL DEFAULT '[]',
+    "error" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "startedAt" DATETIME,
+    "finishedAt" DATETIME
+)`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX "jobs_status_createdAt_idx" ON "jobs"("status", "createdAt")`);
+    changed = true;
+  }
+  const columns = await columnNames(prisma, 'messages');
+  if (!columns.has('queuedJobId')) {
+    await prisma.$executeRawUnsafe(`ALTER TABLE "messages" ADD COLUMN "queuedJobId" TEXT`);
+    changed = true;
+  }
+  return changed;
+}
+
 // ---------------------------------------------------------------------------
 
 async function main() {
@@ -188,6 +223,9 @@ async function main() {
     }
     if (await addRunProgress(prisma)) {
       console.log('[automail] migrated: runs now record live progress');
+    }
+    if (await addJobs(prisma)) {
+      console.log('[automail] migrated: bulk actions now run as background jobs');
     }
   } finally {
     await prisma.$disconnect();

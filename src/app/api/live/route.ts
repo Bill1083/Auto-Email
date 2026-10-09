@@ -1,5 +1,6 @@
 import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { fail, guard, ok } from '@/lib/api';
+import { ATTENTION_QUEUE, REVIEW_QUEUE } from '@/lib/messages-query';
 import { effectiveDailyLimit } from '@/lib/pipeline/budget';
 import { soonestRetry, type LiveRetry } from '@/lib/pipeline/retry-queue';
 import { isRunning } from '@/lib/pipeline/run';
@@ -62,12 +63,8 @@ export async function GET(request: Request) {
 
     const data = await withDatabase(async () => {
       const [awaitingReview, needsAttention, processedToday, running, lastFinished] = await Promise.all([
-        prisma.message.count({
-          where: { ...scope, action: 'TRASH', status: { in: ['PENDING_REVIEW', 'DRY_RUN'] }, userAction: null },
-        }),
-        prisma.message.count({
-          where: { ...scope, action: 'ATTENTION', attentionDoneAt: null, userAction: null, status: { not: 'REVERTED' } },
-        }),
+        prisma.message.count({ where: { ...scope, ...REVIEW_QUEUE } }),
+        prisma.message.count({ where: { ...scope, ...ATTENTION_QUEUE } }),
         prisma.message.count({ where: { ...scope, processedAt: { gte: todayStart } } }),
         prisma.run.findFirst({
           where: { ...scope, status: 'RUNNING' },

@@ -306,6 +306,30 @@ async function loadState(email: string): Promise<MockState> {
   return { labels, extra: [], labelIds: {}, lastMintedAt: 0, epoch };
 }
 
+/**
+ * The fixture mailbox keeps its labels in one row, read and written whole, so
+ * concurrent changes (bulk trash runs several at once) are queued one after
+ * another here. Gmail does the equivalent on its own side.
+ */
+const mutations = new Map<string, Promise<unknown>>();
+
+/**
+ * Optional pretend network delay per mailbox call (MOCK_MAIL_LATENCY_MS), so
+ * the demo mailbox can stand in for Gmail when checking how long bulk work
+ * takes. It is spent outside the lock, as a real round trip would be.
+ */
+function latency(): Promise<void> {
+  const ms = Number(process.env.MOCK_MAIL_LATENCY_MS ?? 0);
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+function serialized<T>(email: string, fn: () => Promise<T>): Promise<T> {
+  const previous = mutations.get(email) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  mutations.set(email, run.catch(() => undefined));
+  return run;
+}
+
 async function saveState(email: string, state: MockState): Promise<void> {
   const value = JSON.stringify(state);
   await withDatabase(() =>
@@ -434,14 +458,17 @@ export class MockProvider implements MailProvider {
   }
 
   async modify(ids: string[], addLabelIds: string[], removeLabelIds: string[]): Promise<void> {
-    const state = await loadState(this.email);
-    for (const id of ids) {
-      const current = new Set(state.labels[id] ?? []);
-      for (const label of removeLabelIds) current.delete(label);
-      for (const label of addLabelIds) current.add(label);
-      state.labels[id] = [...current];
-    }
-    await saveState(this.email, state);
+    await latency();
+    await serialized(this.email, async () => {
+      const state = await loadState(this.email);
+      for (const id of ids) {
+        const current = new Set(state.labels[id] ?? []);
+        for (const label of removeLabelIds) current.delete(label);
+        for (const label of addLabelIds) current.add(label);
+        state.labels[id] = [...current];
+      }
+      await saveState(this.email, state);
+    });
   }
 
   async trash(id: string): Promise<void> {
@@ -453,6 +480,10 @@ export class MockProvider implements MailProvider {
   }
 
   async ensureLabels(names: string[]): Promise<Record<string, string>> {
+    return serialized(this.email, () => this.ensureLabelsNow(names));
+  }
+
+  private async ensureLabelsNow(names: string[]): Promise<Record<string, string>> {
     const state = await loadState(this.email);
     let changed = false;
     const result: Record<string, string> = {};

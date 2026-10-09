@@ -18,6 +18,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
 import { AccountSwitcher } from '@/components/account-switcher';
+import { JobsIndicator, JobsProvider } from '@/components/shared/background-jobs';
 import { Button } from '@/components/ui/button';
 import { api, errorMessage } from '@/lib/client';
 import type { AccountDto } from '@/lib/serialize';
@@ -94,80 +95,84 @@ export function AppShell({
   const pathname = usePathname();
 
   return (
-    <div className="flex min-h-dvh flex-col">
-      {/* Top bar */}
-      <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70">
-        <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-3 px-4">
-          <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
-            <span className="flex size-8 items-center justify-center rounded-md bg-primary/15 text-primary">
-              <Mail className="size-4" />
-            </span>
-            <span className="text-base">
-              Auto<span className="text-primary">Mail</span>
-            </span>
-          </Link>
+    // Bulk actions run on the server; the provider reports on them from any page.
+    <JobsProvider>
+      <div className="flex min-h-dvh flex-col">
+        {/* Top bar */}
+        <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70">
+          <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-3 px-4">
+            <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
+              <span className="flex size-8 items-center justify-center rounded-md bg-primary/15 text-primary">
+                <Mail className="size-4" />
+              </span>
+              <span className="text-base">
+                Auto<span className="text-primary">Mail</span>
+              </span>
+            </Link>
 
-          <nav className="ml-4 hidden items-center gap-1 md:flex">
-            {NAV.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
-                  isActive(pathname, item.href)
-                    ? 'bg-secondary text-foreground'
-                    : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
-                )}
-              >
-                {item.label}
-                {item.href === '/review' && reviewCount > 0 ? (
-                  <span className="tnum rounded-full bg-warning/20 px-1.5 text-[11px] font-semibold text-warning">
-                    {reviewCount > 999 ? '999+' : reviewCount}
-                  </span>
-                ) : null}
-              </Link>
-            ))}
-          </nav>
+            <nav className="ml-4 hidden items-center gap-1 lg:flex">
+              {NAV.map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
+                    isActive(pathname, item.href)
+                      ? 'bg-secondary text-foreground'
+                      : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
+                  )}
+                >
+                  {item.label}
+                  {item.href === '/review' && reviewCount > 0 ? (
+                    <span className="tnum rounded-full bg-warning/20 px-1.5 text-[11px] font-semibold text-warning">
+                      {reviewCount > 999 ? '999+' : reviewCount}
+                    </span>
+                  ) : null}
+                </Link>
+              ))}
+            </nav>
 
-          <div className="ml-auto flex items-center gap-1">
-            <AccountSwitcher accounts={accounts} selectedId={selectedId} />
-            <ThemeToggle />
-            <LogoutButton identity={identity} />
+            <div className="ml-auto flex items-center gap-1">
+              <JobsIndicator />
+              <AccountSwitcher accounts={accounts} selectedId={selectedId} />
+              <ThemeToggle />
+              <LogoutButton identity={identity} />
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* The bottom padding clears the mobile tab bar. */}
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 pb-24 pt-4 sm:pt-6 md:pb-10">
-        {children}
-      </main>
+        {/* The bottom padding clears the mobile tab bar. */}
+        <main className="mx-auto w-full max-w-7xl flex-1 px-4 pb-24 pt-4 sm:pt-6 lg:pb-10">
+          {children}
+        </main>
 
-      {/* Mobile tab bar */}
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 backdrop-blur md:hidden">
-        <div className="mx-auto grid max-w-md grid-cols-5 pb-[env(safe-area-inset-bottom)]">
-          {NAV.map((item) => {
-            const Icon = item.icon;
-            const active = isActive(pathname, item.href);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                aria-current={active ? 'page' : undefined}
-                className={cn(
-                  'relative flex flex-col items-center gap-1 px-2 py-2.5 text-[11px] font-medium transition-colors',
-                  active ? 'text-primary' : 'text-muted-foreground',
-                )}
-              >
-                <Icon className="size-5" />
-                {item.label}
-                {item.href === '/review' && reviewCount > 0 ? (
-                  <span className="absolute right-3 top-1.5 size-2 rounded-full bg-warning" />
-                ) : null}
-              </Link>
-            );
-          })}
-        </div>
-      </nav>
-    </div>
+        {/* Tab bar for phones and tablets; the top nav does not fit below lg. */}
+        <nav className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 backdrop-blur lg:hidden">
+          <div className="mx-auto grid max-w-md grid-cols-5 pb-[env(safe-area-inset-bottom)]">
+            {NAV.map((item) => {
+              const Icon = item.icon;
+              const active = isActive(pathname, item.href);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-current={active ? 'page' : undefined}
+                  className={cn(
+                    'relative flex flex-col items-center gap-1 px-2 py-2.5 text-[11px] font-medium transition-colors',
+                    active ? 'text-primary' : 'text-muted-foreground',
+                  )}
+                >
+                  <Icon className="size-5" />
+                  {item.label}
+                  {item.href === '/review' && reviewCount > 0 ? (
+                    <span className="absolute right-3 top-1.5 size-2 rounded-full bg-warning" />
+                  ) : null}
+                </Link>
+              );
+            })}
+          </div>
+        </nav>
+      </div>
+    </JobsProvider>
   );
 }

@@ -8,6 +8,26 @@ import { ACTIONS, MESSAGE_STATUSES } from '@/lib/types';
 
 export type MessageView = 'review' | 'attention' | 'deleted' | 'all';
 
+/**
+ * What "awaiting review" and "needs attention" mean, in one place, because
+ * the pages, the badges and the live tiles all count them. A message a
+ * background job is already handling belongs to neither.
+ */
+export const REVIEW_QUEUE = {
+  action: 'TRASH',
+  status: { in: ['PENDING_REVIEW', 'DRY_RUN'] },
+  userAction: null,
+  queuedJobId: null,
+} satisfies Prisma.MessageWhereInput;
+
+export const ATTENTION_QUEUE = {
+  action: 'ATTENTION',
+  attentionDoneAt: null,
+  userAction: null,
+  status: { not: 'REVERTED' },
+  queuedJobId: null,
+} satisfies Prisma.MessageWhereInput;
+
 export interface MessageQuery {
   view: MessageView;
   accountId: string | null;
@@ -48,20 +68,15 @@ export function parseMessageQuery(params: URLSearchParams): MessageQuery {
 }
 
 export function messageWhere(query: MessageQuery): Prisma.MessageWhereInput {
-  const where: Prisma.MessageWhereInput = {};
+  let where: Prisma.MessageWhereInput = {};
   if (query.accountId) where.accountId = query.accountId;
 
   switch (query.view) {
     case 'review':
-      where.action = 'TRASH';
-      where.status = { in: ['PENDING_REVIEW', 'DRY_RUN'] };
-      where.userAction = null;
+      where = { ...where, ...REVIEW_QUEUE };
       break;
     case 'attention':
-      where.action = 'ATTENTION';
-      where.attentionDoneAt = null;
-      where.userAction = null;
-      where.status = { not: 'REVERTED' };
+      where = { ...where, ...ATTENTION_QUEUE };
       break;
     case 'deleted':
       where.status = 'TRASHED';
