@@ -9,7 +9,10 @@ export async function register(): Promise<void> {
   if (process.env.NEXT_PHASE === 'phase-production-build') return;
   const { startScheduler } = await import('@/lib/scheduler');
   startScheduler();
-  // Bulk actions queued before a restart carry on where they stopped.
+  // Work cut off by a restart carries on: queued jobs where they stopped,
+  // and mail runs as a fresh run that picks up what the old one had not done.
   const { startJobWorker } = await import('@/lib/jobs');
   await startJobWorker();
+  const { resumeInterruptedRuns } = await import('@/lib/pipeline/run');
+  await resumeInterruptedRuns();
 }

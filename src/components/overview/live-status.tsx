@@ -11,10 +11,10 @@ import {
   useState,
 } from 'react';
 import { Clock, ListChecks, Loader2, Mail, TriangleAlert } from 'lucide-react';
-import { toast } from 'sonner';
 
 import { StatCard, type StatCardProps } from '@/components/stat-card';
 import type { LiveResponse } from '@/app/api/live/route';
+import { RUN_PHASES } from '@/lib/background-text';
 import { api } from '@/lib/client';
 import { cn, formatInt } from '@/lib/utils';
 
@@ -39,7 +39,8 @@ export function useLive(): LiveContextValue | null {
 /**
  * Polls the handful of numbers that move while email is being sorted, and
  * refreshes the whole page once a run finishes so the chart, costs and recent
- * decisions catch up. Polling backs right off when nothing is running and
+ * decisions catch up. The outcome itself is announced by the background
+ * tracker in the header. Polling backs right off when nothing is running and
  * stops entirely while the tab is hidden.
  */
 export function LiveProvider({
@@ -55,7 +56,6 @@ export function LiveProvider({
   const [live, setLive] = useState<LiveResponse>(initial);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wasRunning = useRef(Boolean(initial.run));
-  const announced = useRef<string | null>(initial.lastFinished?.id ?? null);
 
   const running = live.run !== null;
 
@@ -64,30 +64,19 @@ export function LiveProvider({
       const next = await api<LiveResponse>(`/api/live?accountId=${encodeURIComponent(accountId)}`);
       setLive(next);
 
-      // A run that has just finished: say how it went, once, and pull in the
-      // parts of the page this endpoint deliberately does not carry.
-      if (wasRunning.current && !next.run) {
-        const finished = next.lastFinished;
-        if (finished && announced.current !== finished.id) {
-          announced.current = finished.id;
-          if (finished.status === 'FAILED') toast.error(finished.error ?? 'The run failed.');
-          else if (finished.status === 'PARTIAL') {
-            toast.warning(finished.error ?? 'The run finished with problems.');
-          } else {
-            toast.success(
-              finished.fetched === 0
-                ? 'Nothing new to process.'
-                : `${formatInt(finished.fetched)} email${finished.fetched === 1 ? '' : 's'} processed${finished.dryRun ? ' (dry run)' : ''}.`,
-            );
-          }
-        }
-        router.refresh();
-      }
+      // A run that has just finished: pull in the parts of the page this
+      // endpoint deliberately does not carry. Saying how it went is the
+      // header tracker's job, on every page.
+      if (wasRunning.current && !next.run) router.refresh();
       wasRunning.current = Boolean(next.run);
     } catch {
       // A failed poll is not worth surfacing; the next one will tell us.
     }
   }, [accountId, router]);
+
+  // The polling loop's step, kept so "refresh now" can restart the loop
+  // rather than replace it with a single poll.
+  const tickRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,6 +89,7 @@ export function LiveProvider({
       if (cancelled) return;
       timer.current = setTimeout(tick, wasRunning.current ? ACTIVE_MS : IDLE_MS);
     };
+    tickRef.current = tick;
 
     timer.current = setTimeout(tick, wasRunning.current ? ACTIVE_MS : IDLE_MS);
     const onVisible = () => {
@@ -117,7 +107,8 @@ export function LiveProvider({
   const refreshNow = useCallback(() => {
     wasRunning.current = true;
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => void poll(), 400);
+    const tick = tickRef.current;
+    timer.current = setTimeout(() => void (tick ? tick() : poll()), 400);
   }, [poll]);
 
   const value = useMemo<LiveContextValue>(() => ({ live, running, refreshNow }), [live, running, refreshNow]);
@@ -129,14 +120,12 @@ export function LiveProvider({
 // Progress
 // ---------------------------------------------------------------------------
 
-const PHASE: Record<string, { title: string; unit: string }> = {
-  queued: { title: 'Starting', unit: '' },
-  indexing: { title: 'Indexing mailbox', unit: 'found' },
-  reading: { title: 'Reading email', unit: '' },
-  sorting: { title: 'Sorting with AI', unit: '' },
-  applying: { title: 'Filing in Gmail', unit: '' },
-  done: { title: 'Finishing', unit: '' },
-};
+const PHASE: Record<string, { title: string; unit: string }> = Object.fromEntries(
+  Object.entries(RUN_PHASES).map(([phase, title]): [string, { title: string; unit: string }] => [
+    phase,
+    { title, unit: phase === 'indexing' ? 'found' : '' },
+  ]),
+);
 
 /**
  * A thin bar that only exists while a run does. Indexing has no known total

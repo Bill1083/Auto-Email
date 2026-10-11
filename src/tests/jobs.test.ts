@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { jobPercent, jobSummary, type JobProgressLike } from '@/lib/job-text';
+import { jobPercent, jobSummary, runDoing, runSummary, type JobProgressLike } from '@/lib/background-text';
 import { forEachConcurrent } from '@/lib/utils';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -83,5 +83,43 @@ describe('job wording', () => {
   it('counts failures as progress so the bar always reaches the end', () => {
     expect(jobPercent({ total: 200, done: 50, failed: 50 })).toBe(50);
     expect(jobPercent({ total: 0, done: 0, failed: 0 })).toBe(100);
+  });
+});
+
+describe('learned-preferences jobs', () => {
+  const learn: JobProgressLike = { action: 'LEARN', status: 'DONE', total: 1, done: 1, failed: 0, error: null };
+
+  it('says whether the notes were updated', () => {
+    expect(jobSummary(learn)).toBe('Learned preferences updated.');
+    expect(jobSummary({ ...learn, done: 0, failed: 1, error: 'Gemini is overloaded right now (503).' })).toBe(
+      'Learned preferences could not be updated: Gemini is overloaded right now (503).',
+    );
+  });
+});
+
+describe('run wording', () => {
+  const run = { status: 'OK', error: null, processed: 24, dryRun: false, budget: 100 };
+
+  it('reports what a finished run did', () => {
+    expect(runSummary(run)).toBe('24 emails processed.');
+    expect(runSummary({ ...run, dryRun: true })).toBe('24 emails processed (dry run).');
+    expect(runSummary({ ...run, processed: 0 })).toBe('Nothing new to process.');
+  });
+
+  it('says when the daily cap, not an empty inbox, is why nothing happened', () => {
+    expect(runSummary({ ...run, processed: 0, budget: 0 })).toBe(
+      "Today's cap is already used up, so nothing was processed.",
+    );
+  });
+
+  it('passes on the reason a run stopped short', () => {
+    const stopped = 'Stopped by you after 40 emails; the rest will be picked up on the next run.';
+    expect(runSummary({ ...run, status: 'PARTIAL', error: stopped })).toBe(stopped);
+    expect(runSummary({ ...run, status: 'FAILED', error: null })).toBe('The run failed.');
+  });
+
+  it('names each phase, with a fallback for one it does not know', () => {
+    expect(runDoing('sorting')).toBe('Sorting with AI');
+    expect(runDoing('something-new')).toBe('Checking mail');
   });
 });

@@ -65,31 +65,117 @@ export interface RunOutcome {
   deferred?: number;
 }
 
-const locks = new Map<string, Promise<RunOutcome>>();
+/**
+ * Which mailboxes have a run in progress, and which of those the user asked
+ * to stop. Kept on globalThis because the scheduler (started from
+ * instrumentation) and the API routes can load this module separately, and
+ * both must see the same runs.
+ */
+interface RunRegistry {
+  locks: Map<string, Promise<RunOutcome>>;
+  stops: Set<string>;
+}
+
+const globalRuns = globalThis as unknown as { __automailRuns?: RunRegistry };
+
+function registry(): RunRegistry {
+  globalRuns.__automailRuns ??= { locks: new Map(), stops: new Set() };
+  return globalRuns.__automailRuns;
+}
 
 export function isRunning(accountId: string): boolean {
-  return locks.has(accountId);
+  return registry().locks.has(accountId);
 }
 
 export function runAccount(options: RunOptions): Promise<RunOutcome> {
+  const { locks, stops } = registry();
   const existing = locks.get(options.accountId);
   if (existing) return existing;
-  const promise = execute(options).finally(() => locks.delete(options.accountId));
+  stops.delete(options.accountId);
+  const promise = execute(options).finally(() => {
+    locks.delete(options.accountId);
+    stops.delete(options.accountId);
+  });
   locks.set(options.accountId, promise);
   return promise;
 }
 
-/** Sequential, so two accounts never compete for the same Gemini quota. */
+/**
+ * Ask a run to stop. It does so at its next checkpoint (between emails while
+ * reading, between batches while sorting or filing), keeping everything it
+ * already recorded; the rest is offered again on the next run.
+ */
+export function requestStop(accountId: string): boolean {
+  if (!isRunning(accountId)) return false;
+  registry().stops.add(accountId);
+  return true;
+}
+
+class RunStopped extends Error {
+  constructor() {
+    super('Stopped by request.');
+    this.name = 'RunStopped';
+  }
+}
+
+function stopRequested(accountId: string): boolean {
+  return registry().stops.has(accountId);
+}
+
+/** For stretches where nothing is worth keeping if the run stops (indexing). */
+function checkpoint(accountId: string): void {
+  if (stopRequested(accountId)) throw new RunStopped();
+}
+
+/**
+ * At boot: a run still marked RUNNING was cut off by the restart. Close it
+ * honestly and start a fresh one for that mailbox, which picks up exactly the
+ * emails the old one never recorded. A run that keeps getting cut off (say
+ * it is what brings the server down) is not restarted forever.
+ */
+export async function resumeInterruptedRuns(now = new Date()): Promise<void> {
+  const stale = await withDatabase(() =>
+    prisma.run.findMany({ where: { status: 'RUNNING' }, orderBy: { startedAt: 'asc' } }),
+  );
+  if (!stale.ok || stale.data.length === 0) return;
+
+  await withDatabase(() =>
+    prisma.run.updateMany({
+      where: { id: { in: stale.data.map((run) => run.id) } },
+      data: {
+        status: 'PARTIAL',
+        phase: 'done',
+        finishedAt: now,
+        error: 'Interrupted by a server restart; it carried on automatically afterwards.',
+      },
+    }),
+  );
+
+  const latest = new Map(stale.data.map((run) => [run.accountId, run]));
+  for (const run of latest.values()) {
+    if (now.getTime() - run.startedAt.getTime() > 12 * 3_600_000) continue;
+    const recentResumes = await withDatabase(() =>
+      prisma.run.count({
+        where: { accountId: run.accountId, trigger: 'resume', startedAt: { gte: new Date(now.getTime() - 3_600_000) } },
+      }),
+    );
+    if (!recentResumes.ok || recentResumes.data >= 3) continue;
+    console.log(`[automail] resuming the run interrupted for account ${run.accountId}`);
+    void runAccount({ accountId: run.accountId, trigger: 'resume', lane: run.lane as Lane | 'both' });
+  }
+}
+
+/**
+ * Every active mailbox at once. Each has its own lock and its own Gmail
+ * quota; they share Gemini, which copes with being busy by retrying and then
+ * leaving emails for a later run rather than misfiling them.
+ */
 export async function runAllAccounts(trigger: RunTrigger, lane: Lane | 'both' = 'both'): Promise<RunOutcome[]> {
   const accounts = await withDatabase(() =>
     prisma.account.findMany({ where: { status: 'ACTIVE' }, orderBy: { createdAt: 'asc' } }),
   );
   if (!accounts.ok) return [];
-  const outcomes: RunOutcome[] = [];
-  for (const account of accounts.data) {
-    outcomes.push(await runAccount({ accountId: account.id, trigger, lane }));
-  }
-  return outcomes;
+  return Promise.all(accounts.data.map((account) => runAccount({ accountId: account.id, trigger, lane })));
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +307,9 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
   let partialError: string | null = null;
   // Emails Gemini was too busy to sort. Never persisted, so they come round again.
   const deferred: { email: RawEmail; lane: Lane }[] = [];
+  // Stop was asked for: no new reading or AI calls, but what is already
+  // sorted (and paid for) is still filed. The rest waits for the next run.
+  let stopped = false;
   let busyReason: string | null = null;
 
   try {
@@ -249,7 +338,10 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       const ids = await collectBacklogIds(account, provider, settings, budget - candidates.length, {
         // Indexing a large mailbox is the longest silent stretch of a first
         // run, so it reports the ids found so far against no known total.
-        onIndexed: (found) => progress('indexing', found, 0),
+        onIndexed: async (found) => {
+          checkpoint(account.id);
+          await progress('indexing', found, 0);
+        },
       });
       candidates.push(...ids.map((id) => ({ id, lane: 'backlog' as const })));
     }
@@ -259,6 +351,10 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     const gone: string[] = [];
     await progress('reading', 0, candidates.length);
     for (const candidate of candidates) {
+      if (stopRequested(account.id)) {
+        stopped = true;
+        break;
+      }
       // Every tenth message is often enough to look alive without writing on
       // every single fetch.
       if ((emails.length + gone.length) % 10 === 0 && emails.length + gone.length > 0) {
@@ -326,6 +422,11 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       await progress('sorting', 0, needsAi.length);
 
       for (const batch of chunk(needsAi, settings.aiBatchSize)) {
+        if (stopped || stopRequested(account.id)) {
+          stopped = true;
+          sorted += batch.length;
+          continue;
+        }
         const batchEmails = batch.map((b) => b.email);
         // Once Gemini has stayed busy through a full round of retries, every
         // later batch would only repeat the wait. Leave the rest for later.
@@ -394,6 +495,8 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     // --- Plan, apply, persist (in chunks so a mid-run failure loses little) --
     const ruleHits = new Map<string, number>();
     await progress('applying', 0, prepared.length);
+    // Filing is not interrupted by Stop: these are already sorted, and
+    // dropping them now would only mean paying to sort them again.
     for (const group of chunk(prepared, 25)) {
       const planned = group.map((item) => {
         const plan = planChanges({
@@ -497,7 +600,8 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
     // --- Left for later ----------------------------------------------------
     // Backlog items stay PENDING on their own. New mail needs the sync point
     // held back, or the next run would list from after these emails.
-    if (deferred.some((item) => item.lane === 'new')) newLaneExhausted = false;
+    // A stopped run may also have new mail it never even read.
+    if (stopped || deferred.some((item) => item.lane === 'new')) newLaneExhausted = false;
     if (deferred.length > 0) {
       const retryAt = scheduleRetry(account.id);
       const minutes = Math.max(1, Math.round((retryAt.getTime() - Date.now()) / 60_000));
@@ -509,6 +613,11 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       console.warn(`[automail] ${account.email}: ${busy}`);
     } else {
       clearRetry(account.id);
+    }
+    if (stopped) {
+      const note = `Stopped by you after ${persisted} email${persisted === 1 ? '' : 's'}; the rest will be picked up on the next run.`;
+      partialError = partialError ? `${note} Also: ${partialError}` : note;
+      console.log(`[automail] ${account.email}: ${note}`);
     }
 
     // --- Cursors -----------------------------------------------------------
@@ -561,6 +670,14 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
       message: deferred.length > 0 ? `${processedText} ${deferred.length} left for a retry.` : processedText,
     };
   } catch (error) {
+    // Stopped on request. Everything recorded so far stays; cursors are left
+    // where they were, so the next run offers the rest again.
+    if (error instanceof RunStopped) {
+      const message = `Stopped by you after ${persisted} email${persisted === 1 ? '' : 's'}; the rest will be picked up on the next run.`;
+      console.log(`[automail] run ${run.id} for ${account.email}: ${message}`);
+      await finish('PARTIAL', counts, message);
+      return { runId: run.id, status: 'PARTIAL', processed: persisted, message };
+    }
     const message = error instanceof Error ? error.message : 'Unknown error';
     console.error(`[automail] run ${run.id} failed:`, message);
     // A failed run is not a busy Gemini; the normal schedule takes it from here.

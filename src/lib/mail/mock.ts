@@ -428,6 +428,7 @@ export class MockProvider implements MailProvider {
   }
 
   async fetch(id: string, maxBodyChars: number): Promise<RawEmail | null> {
+    await latency();
     const state = await loadState(this.email);
     const stored = this.find(state, id);
     if (!stored) return null;

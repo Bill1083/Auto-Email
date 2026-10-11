@@ -3,10 +3,10 @@ import { z } from 'zod';
 import { getAccount } from '@/lib/accounts';
 import { fail, guard, ok, readJson } from '@/lib/api';
 import { isGeminiConfigured } from '@/lib/gemini';
-import { regenerateLearnedNotes } from '@/lib/pipeline/learning';
+import { enqueueLearn, serializeJob } from '@/lib/jobs';
+import { withDatabase } from '@/lib/prisma';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 90;
 
 const bodySchema = z.object({
   accountId: z.string().min(1).max(64),
@@ -15,9 +15,10 @@ const bodySchema = z.object({
 /**
  * POST /api/rules/learn { accountId }
  *
- * Distils one mailbox's review history into its own learned preferences.
- * Mailbox-scoped on purpose: a work address should not learn from how
- * personal mail was triaged.
+ * Queues a job that distils one mailbox's review history into its own
+ * learned preferences, and answers at once; the model call can take a while
+ * and finishes whether or not the page stays open. Mailbox-scoped on purpose:
+ * a work address should not learn from how personal mail was triaged.
  */
 export async function POST(request: Request) {
   return guard(async () => {
@@ -25,10 +26,11 @@ export async function POST(request: Request) {
 
     const parsed = await readJson(request, bodySchema, 4 * 1024);
     if (!parsed.ok) return parsed.response;
-    if (!(await getAccount(parsed.data.accountId))) return fail('No such account.', 404);
+    const account = await getAccount(parsed.data.accountId);
+    if (!account) return fail('No such account.', 404);
 
-    const result = await regenerateLearnedNotes(parsed.data.accountId);
-    if (!result.ok) return fail(result.reason ?? 'The notes could not be generated.', 422);
-    return ok({ notes: result.notes, costUsd: result.costUsd });
+    const job = await withDatabase(() => enqueueLearn(account.id));
+    if (!job.ok) return fail('The database could not be reached.', 503);
+    return ok({ job: serializeJob(job.data, account.email) }, { status: 202 });
   }, 'POST /api/rules/learn');
 }

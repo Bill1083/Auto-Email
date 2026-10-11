@@ -8,14 +8,21 @@
  * the mailbox work in the server process, whether or not anyone is watching.
  *
  * A job saves the ids it has left after every chunk, so a restart resumes it
- * where it stopped. Jobs run one at a time in the order they were queued; the
- * work inside each is parallel where Gmail allows it (see `bulkAction`).
+ * where it stopped. Jobs for different mailboxes run side by side; jobs for
+ * the same mailbox take turns in the order they were queued, because Gmail's
+ * limits are per mailbox. The work inside each is parallel too, where Gmail
+ * allows it (see `bulkAction`).
+ *
+ * Besides bulk actions on emails, a job can be LEARN: regenerating one
+ * mailbox's learned preferences, which is a slow model call worth not
+ * holding a browser open for.
  */
 
 import type { Job } from '@prisma/client';
 
-import type { JobAction } from '@/lib/job-text';
+import type { BulkJobAction, JobAction, JobDto } from '@/lib/background-text';
 import { BULK_CHUNK_LIMIT, bulkAction, type BulkOutcome } from '@/lib/pipeline/feedback';
+import { regenerateLearnedNotes } from '@/lib/pipeline/learning';
 import { prisma, withDatabase } from '@/lib/prisma';
 
 export const MAX_JOB_IDS = 5_000;
@@ -27,23 +34,16 @@ const RECENT_MS = 24 * 3_600_000;
 /** And are deleted after this long. */
 const KEEP_MS = 7 * 86_400_000;
 
-export interface JobDto {
-  id: string;
-  accountId: string | null;
-  action: JobAction;
-  status: 'QUEUED' | 'RUNNING' | 'DONE' | 'CANCELLED';
-  total: number;
-  done: number;
-  failed: number;
-  error: string | null;
-  createdAt: string;
-  finishedAt: string | null;
-}
+/** Jobs running at once, across all mailboxes. */
+const MAX_PARALLEL = 3;
 
-export function serializeJob(job: Job): JobDto {
+export type { JobDto };
+
+export function serializeJob(job: Job, accountEmail: string | null = null): JobDto {
   return {
     id: job.id,
     accountId: job.accountId,
+    accountEmail,
     action: job.action as JobAction,
     status: job.status as JobDto['status'],
     total: job.total,
@@ -111,6 +111,20 @@ export async function enqueueJob(input: EnqueueInput): Promise<Job> {
   return job;
 }
 
+/**
+ * Queue a LEARN job for one mailbox. Asking again while one is still waiting
+ * or running returns that one rather than queueing a second.
+ */
+export async function enqueueLearn(accountId: string): Promise<Job> {
+  const existing = await prisma.job.findFirst({
+    where: { accountId, action: 'LEARN', status: { in: ACTIVE } },
+  });
+  if (existing) return existing;
+  const job = await prisma.job.create({ data: { accountId, action: 'LEARN', total: 1 } });
+  kickJobs();
+  return job;
+}
+
 /** Stop a job. Emails it had not reached go back to their queues at once. */
 export async function cancelJob(id: string): Promise<Job | null> {
   const updated = await prisma.job.updateMany({
@@ -149,8 +163,12 @@ async function release(jobId: string, ids?: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 interface WorkerState {
-  running: boolean;
-  /** A job arrived while the worker was finishing up; look again. */
+  /** Jobs being worked on now. */
+  inFlight: Set<string>;
+  /** Mailboxes (or "all") with a job in flight; one job per mailbox at a time. */
+  keys: Set<string>;
+  scanning: boolean;
+  /** Something changed while scanning; scan again. */
   again: boolean;
   booted: boolean;
 }
@@ -158,20 +176,92 @@ interface WorkerState {
 const globalWorker = globalThis as unknown as { __automailJobs?: WorkerState };
 
 function workerState(): WorkerState {
-  globalWorker.__automailJobs ??= { running: false, again: false, booted: false };
+  globalWorker.__automailJobs ??= {
+    inFlight: new Set(),
+    keys: new Set(),
+    scanning: false,
+    again: false,
+    booted: false,
+  };
   return globalWorker.__automailJobs;
 }
 
-/** Make sure the worker is draining the queue. Cheap to call often. */
+function keyOf(job: Pick<Job, 'accountId'>): string {
+  return job.accountId ?? 'all';
+}
+
+/** Start whatever queued jobs can start now. Cheap to call often. */
 export function kickJobs(): void {
-  const state = workerState();
-  if (state.running) {
+  void fill(workerState());
+}
+
+async function fill(state: WorkerState): Promise<void> {
+  if (state.scanning) {
     state.again = true;
     return;
   }
-  state.running = true;
-  void drain(state).finally(() => {
-    state.running = false;
+  state.scanning = true;
+  try {
+    do {
+      state.again = false;
+      if (state.inFlight.size >= MAX_PARALLEL) break;
+      const waiting = await withDatabase(() =>
+        prisma.job.findMany({
+          where: { status: { in: ACTIVE }, id: { notIn: [...state.inFlight] } },
+          orderBy: { createdAt: 'asc' },
+        }),
+      );
+      if (!waiting.ok) break;
+      for (const job of waiting.data) {
+        if (state.inFlight.size >= MAX_PARALLEL) break;
+        const key = keyOf(job);
+        if (state.keys.has(key)) continue;
+        state.keys.add(key);
+        state.inFlight.add(job.id);
+        void runJob(job).finally(() => {
+          state.keys.delete(key);
+          state.inFlight.delete(job.id);
+          kickJobs();
+        });
+      }
+    } while (state.again);
+  } finally {
+    state.scanning = false;
+  }
+}
+
+/** Run one job to the end, and never let a broken one spin. */
+async function runJob(job: Job): Promise<void> {
+  try {
+    if (job.action === 'LEARN') await learn(job);
+    else await work(job);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`[automail] job ${job.id} failed:`, message);
+    await withDatabase(() =>
+      prisma.job.updateMany({
+        where: { id: job.id, status: { in: ACTIVE } },
+        data: { status: 'DONE', finishedAt: new Date(), error: message, failed: Math.max(1, job.total - job.done) },
+      }),
+    );
+    await release(job.id);
+  }
+}
+
+async function learn(job: Job): Promise<void> {
+  await prisma.job.update({ where: { id: job.id }, data: { status: 'RUNNING', startedAt: new Date() } });
+  const result = job.accountId
+    ? await regenerateLearnedNotes(job.accountId)
+    : { ok: false, reason: 'No mailbox was given.' };
+  await prisma.job.updateMany({
+    where: { id: job.id, status: 'RUNNING' },
+    data: {
+      status: 'DONE',
+      finishedAt: new Date(),
+      done: result.ok ? 1 : 0,
+      failed: result.ok ? 0 : 1,
+      error: result.ok ? null : (result.reason ?? 'The notes could not be generated.'),
+    },
   });
 }
 
@@ -198,32 +288,6 @@ export async function startJobWorker(): Promise<void> {
   kickJobs();
 }
 
-async function drain(state: WorkerState): Promise<void> {
-  do {
-    state.again = false;
-    for (;;) {
-      const next = await withDatabase(() =>
-        prisma.job.findFirst({ where: { status: { in: ACTIVE } }, orderBy: { createdAt: 'asc' } }),
-      );
-      if (!next.ok || !next.data) break;
-      try {
-        await work(next.data);
-      } catch (error) {
-        // Never spin on one broken job: close it and give its emails back.
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`[automail] job ${next.data.id} failed:`, message);
-        await withDatabase(() =>
-          prisma.job.updateMany({
-            where: { id: next.data!.id, status: { in: ACTIVE } },
-            data: { status: 'DONE', finishedAt: new Date(), error: message },
-          }),
-        );
-        await release(next.data.id);
-      }
-    }
-  } while (state.again);
-}
-
 async function work(job: Job): Promise<void> {
   let pending = parseIds(job.pendingJson);
   let { done, failed } = job;
@@ -248,7 +312,7 @@ async function work(job: Job): Promise<void> {
     const slice = pending.slice(0, BULK_CHUNK_LIMIT);
     let outcome: BulkOutcome;
     try {
-      outcome = await bulkAction(slice, { action: job.action as JobAction, category: job.category, note: job.note });
+      outcome = await bulkAction(slice, { action: job.action as BulkJobAction, category: job.category, note: job.note });
     } catch (caught) {
       const reason = caught instanceof Error ? caught.message : 'Unknown error';
       outcome = { done: [], failed: slice.map((id) => ({ id, error: reason })), remaining: [] };

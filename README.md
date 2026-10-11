@@ -215,16 +215,18 @@ Every route except the ones marked public needs the session cookie.
 | PATCH/DELETE| `/api/accounts/:id`                  | Pause, cap, reset backlog / disconnect              |
 | POST        | `/api/accounts/select`               | Choose the mailbox the dashboard shows              |
 | POST/GET    | `/api/runs`, `/api/runs/:id`         | Start a run in the background / inspect runs        |
+| POST        | `/api/runs/stop`                     | Stop a mailbox's run at its next checkpoint          |
+| GET         | `/api/background`                    | Runs and jobs working now, and what finished in the last day |
 | POST        | `/api/jobs/run`                      | Cron entry point, bearer `CRON_SECRET` (public)     |
 | GET         | `/api/messages`                      | Decisions, filterable (`view=review\|attention\|deleted\|all`) |
 | GET         | `/api/messages/:id/body`             | Body excerpt fetched live from the mailbox          |
 | POST        | `/api/messages/:id/feedback`         | Keep / archive / trash / attention / done / confirm |
 | POST        | `/api/messages/:id/undo`             | Reverse every change made to the message            |
-| GET/POST    | `/api/bulk`                          | Queue a bulk action to run in the background / list jobs |
+| POST        | `/api/bulk`                          | Queue a bulk action to run in the background         |
 | POST        | `/api/bulk/:id/cancel`               | Stop a background job; unreached emails return to the queue |
 | GET/POST    | `/api/rules`, PATCH/DELETE `/api/rules/:id` | Rules and instructions                        |
 | GET/POST    | `/api/rules/suggestions`             | Learned suggestions; accept or dismiss              |
-| POST        | `/api/rules/learn`                   | Regenerate one mailbox's learned preferences        |
+| POST        | `/api/rules/learn`                   | Queue regenerating one mailbox's learned preferences |
 | GET/POST    | `/api/categories`, PATCH/DELETE `/api/categories/:key` | The taxonomy                       |
 | GET/PATCH   | `/api/settings?accountId=`           | That mailbox's settings (defaults to the selected one) |
 | POST        | `/api/settings/reset`                | Clear history                                       |

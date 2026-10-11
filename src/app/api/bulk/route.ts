@@ -2,8 +2,8 @@ import { z } from 'zod';
 
 import { listAccounts, resolveSelection } from '@/lib/accounts';
 import { fail, guard, ok, readJson } from '@/lib/api';
-import { JOB_ACTIONS } from '@/lib/job-text';
-import { MAX_JOB_IDS, enqueueJob, listJobs, serializeJob } from '@/lib/jobs';
+import { BULK_JOB_ACTIONS } from '@/lib/background-text';
+import { MAX_JOB_IDS, enqueueJob, serializeJob } from '@/lib/jobs';
 import { messageWhere, parseMessageQuery } from '@/lib/messages-query';
 import { prisma, withDatabase } from '@/lib/prisma';
 
@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic';
 
 const bodySchema = z
   .object({
-    action: z.enum(JOB_ACTIONS),
+    action: z.enum(BULK_JOB_ACTIONS),
     /** The emails to act on... */
     ids: z.array(z.string().min(1).max(64)).min(1).max(MAX_JOB_IDS).optional(),
     /** ...or everything currently in one of the queues. */
@@ -25,24 +25,12 @@ const bodySchema = z
     message: 'Send either ids or a view, not both.',
   });
 
-/** GET /api/bulk — background jobs still working, and those that finished recently. */
-export async function GET() {
-  return guard(async () => {
-    const result = await withDatabase(() => listJobs());
-    if (!result.ok) return fail('The database could not be reached.', 503);
-    return ok({
-      active: result.data.active.map(serializeJob),
-      recent: result.data.recent.map(serializeJob),
-    });
-  }, 'GET /api/bulk');
-}
-
 /**
  * POST /api/bulk { action, ids | view, accountId?, category?, note? }
  *
  * Queues a bulk action and answers straight away. The emails leave the review
  * queues immediately and the work carries on in the server, so the page can
- * be closed. A view queues everything in it, which is how "Trash all" covers
+ * be closed; GET /api/background reports progress. A view queues everything in it, which is how "Trash all" covers
  * thousands of emails without the browser sending their ids.
  */
 export async function POST(request: Request) {
@@ -79,6 +67,7 @@ export async function POST(request: Request) {
     const job = await withDatabase(() => enqueueJob({ accountId, action, ids: targets, category, note }));
     if (!job.ok) return fail('The database could not be reached.', 503);
     if (job.data.total === 0) return fail('Those emails are already being handled.', 409);
-    return ok({ job: serializeJob(job.data) }, { status: 202 });
+    const email = accounts.find((account) => account.id === accountId)?.email ?? null;
+    return ok({ job: serializeJob(job.data, email) }, { status: 202 });
   }, 'POST /api/bulk');
 }

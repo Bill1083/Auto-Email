@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { JOBS_CHANGED_EVENT, useJobs } from '@/components/shared/background-jobs';
+import { BACKGROUND_CHANGED_EVENT, useBackground } from '@/components/shared/background-tasks';
 import { CategoryBadge, ConfidenceMeter, DecidedByBadge } from '@/components/shared/badges';
 import { EmptyState } from '@/components/shared/empty-state';
 import { MessagePreview } from '@/components/shared/message-preview';
@@ -35,7 +35,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api, errorMessage } from '@/lib/client';
 import { friendlyReason } from '@/lib/gemini-errors';
-import { jobDoing } from '@/lib/job-text';
+import { jobDoing } from '@/lib/background-text';
 import type { MessageDto } from '@/lib/serialize';
 import { formatRelative } from '@/lib/time';
 import { cn } from '@/lib/utils';
@@ -65,7 +65,7 @@ export function ReviewWorkbench({
   dryRun: boolean;
   initialTab?: Tab;
 }) {
-  const jobs = useJobs();
+  const jobs = useBackground();
   const names = useMemo(() => Object.fromEntries(categories.map((c) => [c.key, c.name])), [categories]);
   const [tab, setTab] = useState<Tab>(initialTab);
   const [review, setReview] = useState<MessageDto[] | null>(null);
@@ -105,8 +105,8 @@ export function ReviewWorkbench({
   // that still needs attention), so the lists catch up when one does.
   useEffect(() => {
     const onChanged = () => void load();
-    window.addEventListener(JOBS_CHANGED_EVENT, onChanged);
-    return () => window.removeEventListener(JOBS_CHANGED_EVENT, onChanged);
+    window.addEventListener(BACKGROUND_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(BACKGROUND_CHANGED_EVENT, onChanged);
   }, [load]);
 
   const items = tab === 'review' ? review : attention;

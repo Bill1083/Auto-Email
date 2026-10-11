@@ -18,7 +18,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
 import { AccountSwitcher } from '@/components/account-switcher';
-import { JobsIndicator, JobsProvider } from '@/components/shared/background-jobs';
+import { BackgroundIndicator, BackgroundProvider } from '@/components/shared/background-tasks';
 import { Button } from '@/components/ui/button';
 import { api, errorMessage } from '@/lib/client';
 import type { AccountDto } from '@/lib/serialize';
@@ -95,8 +95,8 @@ export function AppShell({
   const pathname = usePathname();
 
   return (
-    // Bulk actions run on the server; the provider reports on them from any page.
-    <JobsProvider>
+    // Runs and jobs work on the server; the provider reports on them from any page.
+    <BackgroundProvider>
       <div className="flex min-h-dvh flex-col">
         {/* Top bar */}
         <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70">
@@ -133,7 +133,7 @@ export function AppShell({
             </nav>
 
             <div className="ml-auto flex items-center gap-1">
-              <JobsIndicator />
+              <BackgroundIndicator />
               <AccountSwitcher accounts={accounts} selectedId={selectedId} />
               <ThemeToggle />
               <LogoutButton identity={identity} />
@@ -173,6 +173,6 @@ export function AppShell({
           </div>
         </nav>
       </div>
-    </JobsProvider>
+    </BackgroundProvider>
   );
 }

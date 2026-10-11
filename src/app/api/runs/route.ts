@@ -16,8 +16,9 @@ const bodySchema = z.object({
 /**
  * POST /api/runs { accountId | "all", lane }
  *
- * Starts a run in the background and returns immediately; the page polls
- * GET /api/runs for progress.
+ * Starts a run in the background and returns immediately. It works on the
+ * server whether or not the page stays open; GET /api/background reports on
+ * it. "all" runs every active mailbox side by side.
  */
 export async function POST(request: Request) {
   return guard(async () => {
@@ -30,7 +31,10 @@ export async function POST(request: Request) {
       const active = accounts.filter((a) => a.status === 'ACTIVE');
       if (active.length === 0) return fail('No active accounts to run.', 409);
       void runAllAccounts('manual', lane);
-      return ok({ started: active.map((a) => a.id) }, { status: 202 });
+      return ok(
+        { started: active.map((a) => a.id), accounts: active.map((a) => ({ id: a.id, email: a.email })) },
+        { status: 202 },
+      );
     }
 
     const account = await getAccount(accountId);
@@ -43,7 +47,7 @@ export async function POST(request: Request) {
     }
     if (isRunning(account.id)) return ok({ started: [], alreadyRunning: true }, { status: 202 });
     void runAccount({ accountId: account.id, trigger: 'manual', lane });
-    return ok({ started: [account.id] }, { status: 202 });
+    return ok({ started: [account.id], accounts: [{ id: account.id, email: account.email }] }, { status: 202 });
   }, 'POST /api/runs');
 }
 

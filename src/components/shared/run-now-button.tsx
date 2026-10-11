@@ -1,22 +1,16 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Loader2, Play } from 'lucide-react';
-import { toast } from 'sonner';
 
-import { Button } from '@/components/ui/button';
 import { useLive } from '@/components/overview/live-status';
-import { api, errorMessage } from '@/lib/client';
-
-interface RunsResponse {
-  running: boolean;
-  runs: { id: string; status: string; error: string | null; fetched: number; dryRun: boolean }[];
-}
+import { useBackground } from '@/components/shared/background-tasks';
+import { Button } from '@/components/ui/button';
 
 /**
- * Starts a run for the selected mailbox (or all of them) and polls until it
- * finishes, then refreshes the page so every tile reflects the result.
+ * Starts a run for a mailbox (or all of them). The run works on the server,
+ * so this only asks for it; progress, a Stop button and the outcome come from
+ * the background tracker in the header, wherever the user goes next.
  */
 export function RunNowButton({
   accountId,
@@ -35,59 +29,24 @@ export function RunNowButton({
   disabled?: boolean;
   initiallyRunning?: boolean;
 }) {
-  const router = useRouter();
-  // On a page that already watches runs (the Overview), let that do the
-  // polling and the reporting rather than duplicating both here.
+  const background = useBackground();
+  // On the Overview, its own progress bar should start polling at once too.
   const live = useLive();
-  const [running, setRunning] = useState(initiallyRunning);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const busy = live ? live.running : running;
+  const [starting, setStarting] = useState(false);
 
-  useEffect(() => {
-    return () => {
-      if (timer.current) clearTimeout(timer.current);
-    };
-  }, []);
-
-  async function poll(attempt = 0) {
-    try {
-      const data = await api<RunsResponse>(`/api/runs?accountId=${encodeURIComponent(accountId)}&limit=5`);
-      if (data.running && attempt < 600) {
-        timer.current = setTimeout(() => void poll(attempt + 1), 2_000);
-        return;
-      }
-      setRunning(false);
-      const latest = data.runs[0];
-      if (latest?.status === 'FAILED') toast.error(latest.error ?? 'The run failed.');
-      else if (latest?.status === 'PARTIAL') toast.warning(latest.error ?? 'The run finished with problems.');
-      else if (latest) {
-        toast.success(
-          latest.fetched === 0
-            ? 'Nothing new to process.'
-            : `${latest.fetched} email${latest.fetched === 1 ? '' : 's'} processed${latest.dryRun ? ' (dry run)' : ''}.`,
-        );
-      }
-      router.refresh();
-    } catch (error) {
-      setRunning(false);
-      toast.error(errorMessage(error));
-    }
-  }
+  const running = background?.ready ? background.isRunning(accountId) : initiallyRunning;
+  const busy = starting || running;
 
   async function start() {
-    setRunning(true);
-    try {
-      await api('/api/runs', { method: 'POST', json: { accountId, lane } });
-      if (live) live.refreshNow();
-      else timer.current = setTimeout(() => void poll(), 1_500);
-    } catch (error) {
-      setRunning(false);
-      toast.error(errorMessage(error));
-    }
+    if (!background) return;
+    setStarting(true);
+    const started = await background.startRun(accountId, lane);
+    setStarting(false);
+    if (started) live?.refreshNow();
   }
 
   return (
-    <Button onClick={start} disabled={disabled || busy} variant={variant} size={size}>
+    <Button onClick={start} disabled={disabled || busy || !background} variant={variant} size={size}>
       {busy ? <Loader2 className="animate-spin" /> : <Play />}
       {busy ? 'Running…' : label}
     </Button>
