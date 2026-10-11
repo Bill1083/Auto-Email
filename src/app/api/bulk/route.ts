@@ -15,7 +15,7 @@ const bodySchema = z
     /** The emails to act on... */
     ids: z.array(z.string().min(1).max(64)).min(1).max(MAX_JOB_IDS).optional(),
     /** ...or everything currently in one of the queues. */
-    view: z.enum(['review', 'attention']).optional(),
+    view: z.enum(['review', 'attention', 'dryrun']).optional(),
     /** The mailbox it was started from; "all" or absent means the current selection. */
     accountId: z.string().min(1).max(64).optional(),
     category: z.string().trim().min(1).max(40).optional(),

@@ -190,8 +190,11 @@ export async function confirmDecision(messageId: string): Promise<Message> {
 // Bulk
 // ---------------------------------------------------------------------------
 
-/** Everything the bulk route can ask for. RETRY sorts unclassified emails again. */
-export const BULK_ACTIONS = [...ACTIONS, 'DONE', 'CONFIRM', 'UNDO', 'RETRY'] as const;
+/**
+ * Everything a bulk action can ask for. RETRY sorts unclassified emails
+ * again; APPLY carries out decisions made during dry run.
+ */
+export const BULK_ACTIONS = [...ACTIONS, 'DONE', 'CONFIRM', 'UNDO', 'RETRY', 'APPLY'] as const;
 export type BulkActionName = (typeof BULK_ACTIONS)[number];
 
 export interface BulkInput {
@@ -392,6 +395,47 @@ async function applyToAccount(
       feedbackAt: message.feedbackAt ?? now,
       feedbackNote: note ?? message.feedbackNote,
     }));
+    return;
+  }
+
+  // Decisions made during dry run were recorded but never carried out, and a
+  // recorded email is never offered to a run again, so without this they
+  // would sit in the inbox for good once dry run is switched off.
+  if (input.action === 'APPLY') {
+    if (settings.dryRun) {
+      throw new FeedbackError('Dry run is still on for this mailbox; turn it off before applying its decisions.', 409);
+    }
+    const plans = new Map<string, Plan>();
+    const ops: { message: Message; add: string[]; remove: string[] }[] = [];
+    for (const message of all) {
+      // Already carried out some other way since: nothing left to do.
+      if (message.status !== 'DRY_RUN') {
+        outcome.done.push(message.id);
+        continue;
+      }
+      // An attention item the user already marked done is filed, not flagged again.
+      const action: Action =
+        message.action === 'ATTENTION' && message.attentionDoneAt
+          ? 'KEEP'
+          : ((message.userAction ?? message.action) as Action);
+      const plan = planChanges({
+        decision: { action, category: message.userCategory ?? message.category, confidence: message.confidence },
+        currentLabelIds: JSON.parse(message.gmailLabelsJson || '[]') as string[],
+        labelMap,
+        // Never auto-trash from an old preview: proposed deletions go to the
+        // review queue like any other.
+        categories: [],
+        settings,
+        autoTrashRequested: false,
+      });
+      plans.set(message.id, plan);
+      ops.push({ message, add: plan.changes.addedLabelIds, remove: plan.changes.removedLabelIds });
+    }
+    const applied = await modifyInGroups(provider, ops, outcome);
+    await saveAll(applied, outcome, (message) => {
+      const plan = plans.get(message.id)!;
+      return { status: plan.status, appliedAt: now, appliedChangesJson: JSON.stringify(plan.changes) };
+    });
     return;
   }
 

@@ -123,3 +123,11 @@ describe('run wording', () => {
     expect(runDoing('something-new')).toBe('Checking mail');
   });
 });
+
+describe('applying dry-run decisions', () => {
+  it('reports how many were filed', () => {
+    expect(jobSummary({ action: 'APPLY', status: 'DONE', total: 240, done: 240, failed: 0, error: null })).toBe(
+      '240 emails filed in Gmail.',
+    );
+  });
+});

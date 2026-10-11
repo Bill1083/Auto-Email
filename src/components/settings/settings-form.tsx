@@ -141,7 +141,7 @@ export function SettingsForm({
           <div className="sm:col-span-2 lg:col-span-3">
             <Toggle
               label="Dry run"
-              hint="Decide and log everything for this mailbox, but change nothing in Gmail. Turn it off once the review queue looks right."
+              hint="Decide and log everything for this mailbox, but change nothing in Gmail. Turn it off once the review queue looks right; the Overview then offers to carry out the decisions made while it was on."
               checked={form.dryRun}
               onChange={(v) => setForm({ ...form, dryRun: v })}
             />

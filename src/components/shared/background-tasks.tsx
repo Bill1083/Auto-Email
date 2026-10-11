@@ -42,7 +42,7 @@ const ANNOUNCED_KEY = 'automail:announced';
 export interface EnqueueRequest {
   action: BulkJobAction;
   ids?: string[];
-  view?: 'review' | 'attention';
+  view?: 'review' | 'attention' | 'dryrun';
   accountId?: string;
   category?: string;
 }

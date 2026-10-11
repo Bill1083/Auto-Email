@@ -17,6 +17,7 @@ import { soonestRetry } from '@/lib/pipeline/retry-queue';
 import { ActivityChart } from '@/components/overview/activity-chart';
 import { LiveProvider, LiveStatCard, RetryNotice, RunProgress } from '@/components/overview/live-status';
 import { SetupChecklist } from '@/components/overview/setup-checklist';
+import { UnappliedDryRunCard, type UnappliedMailbox } from '@/components/overview/unapplied-dry-run';
 import type { LiveResponse } from '@/app/api/live/route';
 import { ActionBadge, CategoryBadge, ConfidenceMeter, DecidedByBadge } from '@/components/shared/badges';
 import { EmptyState } from '@/components/shared/empty-state';
@@ -47,12 +48,28 @@ export default async function OverviewPage() {
   // The schedule shown is the selected mailbox's own; on "All accounts" each
   // mailbox runs on its own times.
   const settings = selected ? perAccount.get(selected.id) : null;
-  const [stats, latest] = await Promise.all([
+  // Mailboxes out of dry run that still hold decisions made during it.
+  const liveMailboxes = (selected ? [selected] : accounts).filter((account) => !perAccount.get(account.id)?.dryRun);
+  const [stats, latest, unapplied] = await Promise.all([
     overviewStats(selected?.id ?? null, accounts, perAccount),
     withDatabase(() =>
       prisma.message.findMany({ where: scope, orderBy: { processedAt: 'desc' }, take: 8 }),
     ),
+    withDatabase(() =>
+      prisma.message.groupBy({
+        by: ['accountId'],
+        where: { accountId: { in: liveMailboxes.map((a) => a.id) }, status: 'DRY_RUN', queuedJobId: null },
+        _count: true,
+      }),
+    ),
   ]);
+  const unappliedMailboxes: UnappliedMailbox[] = unapplied.ok
+    ? unapplied.data.map((row) => ({
+        id: row.accountId,
+        email: accounts.find((a) => a.id === row.accountId)?.email ?? '',
+        count: row._count,
+      }))
+    : [];
   const status = integrationStatus();
   const names = Object.fromEntries(categories.map((c) => [c.key, c.name]));
   const emailById = new Map(accounts.map((a) => [a.id, a.email]));
@@ -138,6 +155,8 @@ export default async function OverviewPage() {
           dryRunAccounts={stats.dryRunAccounts}
           needsReauth={stats.accountsNeedingReauth}
         />
+
+        <UnappliedDryRunCard mailboxes={unappliedMailboxes} />
 
         {/* Only present while a run is working. */}
         <RunProgress showMailbox={!selected} />

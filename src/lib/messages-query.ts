@@ -6,7 +6,8 @@ import type { Prisma } from '@prisma/client';
 
 import { ACTIONS, MESSAGE_STATUSES } from '@/lib/types';
 
-export type MessageView = 'review' | 'attention' | 'deleted' | 'all';
+/** `dryrun`: decided during dry run and never carried out in the mailbox. */
+export type MessageView = 'review' | 'attention' | 'deleted' | 'dryrun' | 'all';
 
 /**
  * What "awaiting review" and "needs attention" mean, in one place, because
@@ -54,7 +55,7 @@ export function parseMessageQuery(params: URLSearchParams): MessageQuery {
   };
   const accountParam = params.get('accountId');
   return {
-    view: view === 'review' || view === 'attention' || view === 'deleted' ? view : 'all',
+    view: view === 'review' || view === 'attention' || view === 'deleted' || view === 'dryrun' ? view : 'all',
     accountId: accountParam && accountParam !== 'all' ? accountParam : null,
     action: pick('action', ACTIONS),
     category: pick('category'),
@@ -80,6 +81,10 @@ export function messageWhere(query: MessageQuery): Prisma.MessageWhereInput {
       break;
     case 'deleted':
       where.status = 'TRASHED';
+      break;
+    case 'dryrun':
+      where.status = 'DRY_RUN';
+      where.queuedJobId = null;
       break;
     default:
       if (query.action) where.action = query.action;

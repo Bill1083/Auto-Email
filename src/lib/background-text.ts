@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 /** Actions on a set of emails, queued from the review page. */
-export const BULK_JOB_ACTIONS = ['TRASH', 'KEEP', 'ARCHIVE', 'DONE', 'RETRY'] as const;
+export const BULK_JOB_ACTIONS = ['TRASH', 'KEEP', 'ARCHIVE', 'DONE', 'RETRY', 'APPLY'] as const;
 export type BulkJobAction = (typeof BULK_JOB_ACTIONS)[number];
 
 /** Every kind of job; LEARN regenerates one mailbox's learned preferences. */
@@ -38,6 +38,7 @@ const WORDS: Record<JobAction, { doing: string; done: string }> = {
   ARCHIVE: { doing: 'Archiving', done: 'archived' },
   DONE: { doing: 'Marking as handled', done: 'marked as handled' },
   RETRY: { doing: 'Sorting again with AI', done: 'sorted again by the AI' },
+  APPLY: { doing: 'Applying dry-run decisions', done: 'filed in Gmail' },
   LEARN: { doing: 'Updating learned preferences', done: 'updated' },
 };
 
