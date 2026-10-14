@@ -21,6 +21,7 @@ import {
   type GeminiFailureCode,
   type Schema,
 } from '@/lib/gemini';
+import { addUsage } from '@/lib/pipeline/cost';
 import type { FeedbackExample } from '@/lib/pipeline/learning';
 import type { AppSettings } from '@/lib/settings';
 import { ACTIONS, ZERO_USAGE, type Action, type Decision, type RawEmail, type TokenUsage } from '@/lib/types';
@@ -267,11 +268,94 @@ export interface ClassifyBatchResult {
   latencyMs: number;
 }
 
+/**
+ * Failures one email can cause for a whole batch: Google's filter refusing
+ * the request, or an answer cut short or garbled. Worth splitting over.
+ */
+const SPLITTABLE = new Set<GeminiFailureCode>(['BLOCKED', 'TRUNCATED', 'EMPTY_RESPONSE', 'INVALID_JSON', 'SCHEMA_MISMATCH']);
+
+/** Never auto-trash on the strength of a sender and subject alone. */
+const HEADERS_ONLY_MAX_CONFIDENCE = 60;
+
+/**
+ * Classify a batch. If Gemini refuses or garbles the answer, the batch is
+ * split in half and each half tried again, down to single emails, so one
+ * spam email the filter will not touch costs only itself rather than the
+ * nine beside it. A single email Gemini still will not read is tried once
+ * more from its sender and subject alone.
+ */
 export async function classifyBatch(
   emails: RawEmail[],
   examples: FeedbackExample[],
   ctx: ClassifyContext,
   systemInstruction = buildSystemInstruction(ctx),
+): Promise<ClassifyBatchResult> {
+  const first = await classifyOnce(emails, examples, ctx, systemInstruction);
+  if (first.ok || first.transient || !first.errorCode || !SPLITTABLE.has(first.errorCode)) return first;
+
+  if (emails.length > 1) {
+    const middle = Math.ceil(emails.length / 2);
+    const parts: ClassifyBatchResult[] = [];
+    for (const half of [emails.slice(0, middle), emails.slice(middle)]) {
+      parts.push(await classifyBatch(half, examples, ctx, systemInstruction));
+    }
+    return combine([first, ...parts], parts);
+  }
+
+  const [email] = emails;
+  if (first.errorCode !== 'BLOCKED' && first.errorCode !== 'EMPTY_RESPONSE') return first;
+
+  const bare: RawEmail = { ...email, bodyText: '(body left out: the content filter would not let it through)', snippet: '' };
+  const second = await classifyOnce([bare], examples, ctx, systemInstruction);
+  if (second.ok) {
+    const decision = second.decisions.get(email.id);
+    if (decision) {
+      second.decisions.set(email.id, {
+        ...decision,
+        confidence: Math.min(decision.confidence, HEADERS_ONLY_MAX_CONFIDENCE),
+        guardNote: [
+          decision.guardNote,
+          "Sorted from the sender and subject only: Google's content filter would not let Gemini read the body.",
+        ]
+          .filter(Boolean)
+          .join(' '),
+      });
+    }
+    return combine([first, second], [second]);
+  }
+
+  // Not even the sender and subject: hand it to the user, and say plainly why.
+  const reason = `Not classified: ${first.errorReason ?? "Google's content filter stopped Gemini."} It would not read this email even from its sender and subject, which usually means spam or phishing, so have a look yourself.`;
+  const failed = combine([first, second], [second]);
+  failed.decisions = new Map([[email.id, fallbackDecision(reason)]]);
+  return failed;
+}
+
+/**
+ * One answer from several calls: decisions from `parts`, usage and time
+ * from every call that was made.
+ */
+function combine(calls: ClassifyBatchResult[], parts: ClassifyBatchResult[]): ClassifyBatchResult {
+  const decisions = new Map<string, Decision>();
+  for (const part of parts) for (const [id, decision] of part.decisions) decisions.set(id, decision);
+  const failed = parts.find((part) => !part.ok);
+  return {
+    decisions,
+    ok: parts.every((part) => part.ok),
+    transient: parts.some((part) => part.transient),
+    errorCode: failed?.errorCode ?? null,
+    errorReason: failed?.errorReason ?? null,
+    model: calls[0].model,
+    usage: calls.reduce((sum, call) => addUsage(sum, call.usage), { ...ZERO_USAGE }),
+    latencyMs: calls.reduce((sum, call) => sum + call.latencyMs, 0),
+  };
+}
+
+async function classifyOnce(
+  emails: RawEmail[],
+  examples: FeedbackExample[],
+  ctx: ClassifyContext,
+  systemInstruction: string,
 ): Promise<ClassifyBatchResult> {
   const enabledKeys = ctx.categories.filter((c) => c.enabled).map((c) => c.key);
   const outcome = await generateStructured({
@@ -289,10 +373,11 @@ export async function classifyBatch(
 
   if (!outcome.ok) {
     // The newer failure codes carry a complete sentence of their own.
-    const reason =
-      outcome.code === 'API_ERROR' || outcome.code === 'OVERLOADED' || outcome.code === 'RATE_LIMITED'
-        ? outcome.reason
-        : `${describeFailure(outcome.code)} ${outcome.reason}`.trim();
+    const reason = ['API_ERROR', 'OVERLOADED', 'RATE_LIMITED', 'BLOCKED', 'TRUNCATED', 'EMPTY_RESPONSE'].includes(
+      outcome.code,
+    )
+      ? outcome.reason
+      : `${describeFailure(outcome.code)} ${outcome.reason}`.trim();
     for (const email of emails) decisions.set(email.id, fallbackDecision(`Not classified: ${reason}`));
     return {
       decisions,

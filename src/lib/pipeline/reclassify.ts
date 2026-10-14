@@ -146,17 +146,27 @@ async function reclassifyForAccount(
       }),
     );
 
-    // Still failing: leave the email exactly as it is and say why.
-    if (!result.ok) {
-      const reason = result.transient
-        ? 'Gemini is still busy. Try again in a few minutes.'
-        : (result.errorReason ?? 'Gemini could not classify this email.');
-      for (const item of batch) outcome.failed.push({ id: item.message.id, error: reason });
+    // Gemini busy: leave every email exactly as it is.
+    if (result.transient) {
+      for (const item of batch) {
+        outcome.failed.push({ id: item.message.id, error: 'Gemini is still busy. Try again in a few minutes.' });
+      }
       continue;
     }
 
+    // Otherwise each email stands alone: one Gemini will not read must not
+    // hold back the rest of its batch.
     for (const item of batch) {
       const aiDecision = result.decisions.get(item.email.id) ?? fallbackDecision('No decision returned.');
+      if (aiDecision.decidedBy === 'fallback') {
+        const reason = aiDecision.reason.replace(/^Not classified: /, '');
+        outcome.failed.push({ id: item.message.id, error: reason });
+        // Leave it unclassified, but with the real reason rather than the old one.
+        await withDatabase(() =>
+          prisma.message.update({ where: { id: item.message.id }, data: { reason: aiDecision.reason.slice(0, 400) } }),
+        );
+        continue;
+      }
       const decision = item.rule && item.rule.rule.action ? withRuleAction(aiDecision, item.rule.rule) : aiDecision;
       decided.push({ message: item.message, decision });
     }

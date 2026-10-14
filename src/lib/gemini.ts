@@ -11,7 +11,7 @@
  * cost figures on the dashboard are computed from.
  */
 
-import { GoogleGenAI, Type, type Schema } from '@google/genai';
+import { GoogleGenAI, HarmBlockThreshold, HarmCategory, Type, type Schema } from '@google/genai';
 import type { ZodType, ZodTypeDef } from 'zod';
 
 import { env } from '@/lib/env';
@@ -36,6 +36,10 @@ export type GeminiFailureCode =
   | 'OVERLOADED'
   /** This key is being rate limited (429); worth trying again later. */
   | 'RATE_LIMITED'
+  /** Google's content filter refused the request or withheld the answer. */
+  | 'BLOCKED'
+  /** The answer hit the output limit before it was complete. */
+  | 'TRUNCATED'
   | 'API_ERROR';
 
 /**
@@ -78,6 +82,24 @@ export interface StructuredRequest<T> {
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * The app only ever asks Gemini to classify the user's own mail, and a
+ * mailbox is exactly where spam, phishing and adult promotions turn up. With
+ * the default filters, one such email can make Gemini withhold the answer
+ * for its whole batch. These are the adjustable categories; Google's
+ * non-adjustable checks (e.g. PROHIBITED_CONTENT) still apply, and the
+ * classifier copes with those separately.
+ */
+const SAFETY_SETTINGS = [
+  HarmCategory.HARM_CATEGORY_HARASSMENT,
+  HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+  HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+  HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+].map((category) => ({ category, threshold: HarmBlockThreshold.BLOCK_NONE }));
+
+/** Finish reasons that mean a filter, not the model, cut the answer. */
+const FILTERED_FINISH = new Set(['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION']);
 
 let client: GoogleGenAI | null = null;
 let clientKey: string | null = null;
@@ -159,6 +181,9 @@ export async function generateStructured<T>(
 
   let text: string | undefined;
   let usage: TokenUsage = { ...ZERO_USAGE };
+  // Why the answer ended, and whether the request itself was refused.
+  let finishReason: string | null = null;
+  let blockReason: string | null = null;
   for (let attempt = 1; ; attempt += 1) {
     try {
       const response = await getClient(apiKey).models.generateContent({
@@ -171,11 +196,14 @@ export async function generateStructured<T>(
           responseMimeType: 'application/json',
           responseSchema: request.schema,
           thinkingConfig: { thinkingBudget: request.thinkingBudget ?? 0 },
+          safetySettings: SAFETY_SETTINGS,
           abortSignal: AbortSignal.timeout(timeoutMs),
         },
       });
       text = response.text;
       usage = usageFromMetadata(response.usageMetadata);
+      finishReason = response.candidates?.[0]?.finishReason ?? null;
+      blockReason = response.promptFeedback?.blockReason ?? null;
       break;
     } catch (error) {
       const latencyMs = Date.now() - started;
@@ -221,11 +249,44 @@ export async function generateStructured<T>(
 
   const latencyMs = Date.now() - started;
 
+  // Say what actually happened rather than guessing: Google reports whether
+  // the request was refused outright, or why the answer stopped.
+  if (blockReason) {
+    return {
+      ok: false,
+      code: 'BLOCKED',
+      reason: `Google's content filter refused to process the request (${blockReason}).`,
+      model,
+      usage,
+      latencyMs,
+    };
+  }
+  if (finishReason && FILTERED_FINISH.has(finishReason)) {
+    return {
+      ok: false,
+      code: 'BLOCKED',
+      reason: `Google's content filter withheld Gemini's answer (${finishReason}).`,
+      model,
+      usage,
+      latencyMs,
+    };
+  }
+  if (finishReason === 'MAX_TOKENS') {
+    return {
+      ok: false,
+      code: 'TRUNCATED',
+      reason: 'Gemini ran out of room before finishing its answer (MAX_TOKENS).',
+      model,
+      usage,
+      latencyMs,
+    };
+  }
+
   if (!text || !text.trim()) {
     return {
       ok: false,
       code: 'EMPTY_RESPONSE',
-      reason: 'Gemini returned an empty response, most likely a safety block.',
+      reason: `Gemini returned an empty answer${finishReason ? ` (finish reason: ${finishReason})` : ''}.`,
       model,
       usage,
       latencyMs,
@@ -287,6 +348,10 @@ export function describeFailure(code: GeminiFailureCode): string {
       return 'Gemini timed out.';
     case 'EMPTY_RESPONSE':
       return 'Gemini returned nothing usable.';
+    case 'BLOCKED':
+      return "Google's content filter stopped Gemini.";
+    case 'TRUNCATED':
+      return 'Gemini ran out of room for its answer.';
     case 'INVALID_JSON':
     case 'SCHEMA_MISMATCH':
       return 'Gemini returned data that did not match the required schema.';

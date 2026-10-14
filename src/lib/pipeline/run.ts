@@ -472,7 +472,12 @@ async function execute(options: RunOptions): Promise<RunOutcome> {
           continue;
         }
         if (!result.ok && result.errorReason) {
-          partialError = `${result.errorCode}: ${result.errorReason}`;
+          // Batches are split on failure, so this is usually one or two
+          // emails rather than the whole batch; say how many.
+          const unsorted = batch.filter((b) => result.decisions.get(b.email.id)?.decidedBy === 'fallback').length;
+          partialError = `${unsorted} email${unsorted === 1 ? '' : 's'} could not be classified and ${
+            unsorted === 1 ? 'is' : 'are'
+          } in Needs attention: ${result.errorReason}`;
         }
 
         for (const item of batch) {
